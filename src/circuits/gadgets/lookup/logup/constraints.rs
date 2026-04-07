@@ -67,10 +67,8 @@ impl<F: Field, FV: FieldVar<F, F::BasePrimeField>> LookupArgumentGadget<F>
 
         // Compute multiplicities if concrete values are available.
         // The table is assumed to contain unique elements.
-        let multiplicities: Vec<F> = table_vals
-            .ok()
-            .zip(entry_vals.ok())
-            .map(|(t_vals, e_vals)| {
+        let multiplicities: Vec<F> = match (table_vals, entry_vals) {
+            (Ok(t_vals), Ok(e_vals)) => {
                 let table_index: HashMap<F, usize> = cfg_iter!(t_vals)
                     .enumerate()
                     .map(|(i, &v)| (v, i))
@@ -84,13 +82,14 @@ impl<F: Field, FV: FieldVar<F, F::BasePrimeField>> LookupArgumentGadget<F>
                 }
 
                 counts.into_iter().map(F::from).collect()
-            })
-            .unwrap_or_else(|| vec![F::default(); self.config.table_size]);
+            }
+            _ => vec![F::zero(); self.config.table_size],
+        };
 
         // Allocate multiplicities as witness variables.
-        let mutiplicity_vars = Vec::<FV>::new_witness(cs, || Ok(multiplicities))?;
+        let multiplicity_vars = Vec::<FV>::new_witness(cs, || Ok(multiplicities))?;
 
-        self.multiplicity_vars = Some(mutiplicity_vars);
+        self.multiplicity_vars = Some(multiplicity_vars);
         self.table_vars = Some(table_vars.to_vec());
         self.entry_vars = Some(entry_vars.to_vec());
 
@@ -150,13 +149,9 @@ pub fn enforce_lookup_vector_indexing<F: PrimeField>(
         .zip(query_values.iter())
         .map(|(i, v)| vec![i.clone(), v.clone()])
         .collect::<Vec<_>>();
-    enforce_logup_rows(
-        cs,
-        &table_rows,
-        &query_rows,
-        logup_challenge,
-        &[index_challenge.clone(), FpVar::Constant(F::from(1u64))],
-    )?;
+    let row_coeffs = vec![index_challenge.clone(), FpVar::Constant(F::from(1u64))];
+
+    enforce_logup_rows(cs, &table_rows, &query_rows, logup_challenge, &row_coeffs)?;
 
     Ok(())
 }
@@ -218,19 +213,6 @@ pub fn enforce_logup_rows<F: PrimeField>(
     challenge: &FpVar<F>,
     row_coeffs: &[FpVar<F>],
 ) -> Result<(), SynthesisError> {
-    if table_rows.is_empty() || query_rows.is_empty() {
-        return Err(SynthesisError::AssignmentMissing);
-    }
-    let row_len = table_rows[0].len();
-    if row_len == 0 || row_coeffs.len() != row_len {
-        return Err(SynthesisError::AssignmentMissing);
-    }
-    if table_rows.iter().any(|r| r.len() != row_len)
-        || query_rows.iter().any(|r| r.len() != row_len)
-    {
-        return Err(SynthesisError::AssignmentMissing);
-    }
-
     // exps := count(table_row_j, queries) ; allocated as witness (gnark hint equivalent)
     let exps = Vec::<FpVar<F>>::new_witness(cs, || {
         let t_vals: Result<Vec<Vec<F>>, _> = table_rows
