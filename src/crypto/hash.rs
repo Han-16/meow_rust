@@ -1,4 +1,8 @@
 use ark_bn254::{Fr, G1Affine};
+use ark_crypto_primitives::sponge::{
+    poseidon::{traits::find_poseidon_ark_and_mds, PoseidonConfig, PoseidonSponge},
+    CryptographicSponge,
+};
 use ark_ec::AffineRepr;
 use ark_ff::{BigInteger, PrimeField, Zero};
 use sha3::{Digest, Keccak256};
@@ -71,6 +75,35 @@ pub fn generate_unique_indices(seed: Fr, n: usize, l: usize) -> Result<Vec<usize
         }
     }
     Ok(out)
+}
+
+pub fn poseidon_sponge_config_bn254() -> PoseidonConfig<Fr> {
+    let rate = 2usize;
+    let full_rounds = 8usize;
+    let partial_rounds = 56usize;
+    let alpha = 5u64;
+    let (ark, mds) = find_poseidon_ark_and_mds::<Fr>(
+        Fr::MODULUS_BIT_SIZE as u64,
+        rate,
+        full_rounds as u64,
+        partial_rounds as u64,
+        0,
+    );
+    PoseidonConfig {
+        full_rounds,
+        partial_rounds,
+        alpha,
+        ark,
+        mds,
+        rate,
+        capacity: 1,
+    }
+}
+
+pub fn poseidon_hash_elements_bn254(cfg: &PoseidonConfig<Fr>, inputs: &[Fr]) -> Fr {
+    let mut sponge = PoseidonSponge::<Fr>::new(cfg);
+    sponge.absorb(&inputs.to_vec());
+    sponge.squeeze_field_elements::<Fr>(1)[0]
 }
 
 #[cfg(test)]
