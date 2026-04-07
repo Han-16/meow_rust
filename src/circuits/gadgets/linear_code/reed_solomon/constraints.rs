@@ -4,9 +4,9 @@ use ark_relations::r1cs::{Namespace, SynthesisError};
 use ark_std::{borrow::Borrow, marker::PhantomData};
 
 use crate::circuits::gadgets::linear_code::{
-    LinearCode,
     constraints::{LinearCodeGadget, ProbabilisticEncodingTestGadget},
     reed_solomon::ReedSolomonCode,
+    LinearCode,
 };
 
 pub struct ReedSolomonGadget<F: PrimeField, FV: FieldVar<F, F>> {
@@ -45,15 +45,25 @@ impl<F: PrimeField, FV: FieldVar<F, F>> ProbabilisticEncodingTestGadget<F>
     type PointVar = FV;
 
     fn evaluate_message(&self, message: &[FV], point: &FV) -> FV {
-        message
-            .iter()
-            .fold(FV::zero(), |acc, m| acc + m.clone() * point)
+        let mut acc = FV::zero();
+        let mut pow = FV::one();
+        for m in message {
+            acc += m.clone() * pow.clone();
+            pow *= point.clone();
+        }
+        acc
     }
 
     fn evaluate_codeword(&self, codeword: &[FV], point: &FV) -> FV {
-        let cofactor = point
+        let n = F::from(self.codeword_length as u64);
+        let n_inv = n
+            .inverse()
+            .expect("codeword length must be invertible in field");
+        let cofactor = (point
             .pow_by_constant(&[self.codeword_length as u64])
-            .unwrap();
+            .unwrap()
+            - FV::one())
+            * FV::constant(n_inv);
         let (result, _) = codeword
             .iter()
             .fold((FV::zero(), FV::one()), |(eval, omega_i), c| {

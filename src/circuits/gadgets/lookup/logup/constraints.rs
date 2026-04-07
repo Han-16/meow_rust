@@ -1,6 +1,6 @@
 use ark_ff::{Field, PrimeField};
 
-use ark_r1cs_std::{R1CSVar, alloc::AllocVar, eq::EqGadget, fields::FieldVar, fields::fp::FpVar};
+use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar, fields::FieldVar, R1CSVar};
 use ark_relations::r1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use ark_std::cfg_iter;
 use std::collections::HashMap;
@@ -138,7 +138,6 @@ pub fn enforce_lookup_vector_indexing<F: PrimeField>(
         return Err(SynthesisError::AssignmentMissing);
     }
 
-    // gnark logderivlookup 방식:
     // table row: [index, table_value], query row: [query_index, query_value]
     // row linear combination with coefficients [alpha, 1].
     let table_rows = table_values
@@ -175,7 +174,10 @@ fn row_linear_combination<F: PrimeField>(
         .fold(FpVar::<F>::zero(), |acc, (v, c)| acc + (v * c)))
 }
 
-fn compute_counts<F: PrimeField>(table: &[Vec<F>], queries: &[Vec<F>]) -> Result<Vec<F>, SynthesisError> {
+fn compute_counts<F: PrimeField>(
+    table: &[Vec<F>],
+    queries: &[Vec<F>],
+) -> Result<Vec<F>, SynthesisError> {
     if table.is_empty() {
         return Err(SynthesisError::AssignmentMissing);
     }
@@ -187,8 +189,6 @@ fn compute_counts<F: PrimeField>(table: &[Vec<F>], queries: &[Vec<F>]) -> Result
         return Err(SynthesisError::AssignmentMissing);
     }
 
-    // gnark countHint와 동일하게 table row uniqueness를 요구하고,
-    // 모든 query row가 table row 중 하나여야 한다.
     let mut table_index = HashMap::<Vec<F>, usize>::new();
     for (i, row) in table.iter().enumerate() {
         if table_index.insert(row.clone(), i).is_some() {
@@ -225,7 +225,8 @@ pub fn enforce_logup_rows<F: PrimeField>(
     if row_len == 0 || row_coeffs.len() != row_len {
         return Err(SynthesisError::AssignmentMissing);
     }
-    if table_rows.iter().any(|r| r.len() != row_len) || query_rows.iter().any(|r| r.len() != row_len)
+    if table_rows.iter().any(|r| r.len() != row_len)
+        || query_rows.iter().any(|r| r.len() != row_len)
     {
         return Err(SynthesisError::AssignmentMissing);
     }
@@ -270,6 +271,19 @@ mod tests {
         SynthesisError,
     };
 
+    fn vec_fr(xs: &[u64]) -> Vec<Fr> {
+        xs.iter().map(|&x| Fr::from(x)).collect()
+    }
+
+    fn assert_circuit_satisfied<C: ConstraintSynthesizer<Fr>>(
+        circuit: C,
+    ) -> Result<usize, SynthesisError> {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone())?;
+        assert!(cs.is_satisfied()?);
+        Ok(cs.num_constraints())
+    }
+
     #[derive(Clone)]
     struct SimpleLookupCircuit {
         table: Vec<Fr>,
@@ -279,8 +293,7 @@ mod tests {
 
     impl ConstraintSynthesizer<Fr> for SimpleLookupCircuit {
         fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
-            let table_vars =
-                Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.table.clone()))?;
+            let table_vars = Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.table.clone()))?;
             let entry_vars =
                 Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.entries.clone()))?;
             let beta_var = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.beta))?;
@@ -306,8 +319,7 @@ mod tests {
 
     impl ConstraintSynthesizer<Fr> for VectorIndexLookupCircuit {
         fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
-            let table_vars =
-                Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.table.clone()))?;
+            let table_vars = Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.table.clone()))?;
             let query_index_vars = Vec::<FpVar<Fr>>::new_input(cs.clone(), || {
                 Ok(self
                     .query_indices
@@ -332,39 +344,132 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct QueryNotInTableCircuit {
+        beta: Fr,
+        alpha: Fr,
+    }
+
+    impl ConstraintSynthesizer<Fr> for QueryNotInTableCircuit {
+        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
+            let table_rows = vec![
+                vec![
+                    FpVar::Constant(Fr::from(0u64)),
+                    FpVar::Constant(Fr::from(10u64)),
+                ],
+                vec![
+                    FpVar::Constant(Fr::from(1u64)),
+                    FpVar::Constant(Fr::from(20u64)),
+                ],
+            ];
+            let query_rows = vec![vec![
+                FpVar::new_input(cs.clone(), || Ok(Fr::from(1u64)))?,
+                FpVar::new_witness(cs.clone(), || Ok(Fr::from(999u64)))?,
+            ]];
+
+            let beta = FpVar::new_input(cs.clone(), || Ok(self.beta))?;
+            let alpha = FpVar::new_input(cs, || Ok(self.alpha))?;
+            let coeffs = vec![alpha, FpVar::Constant(Fr::from(1u64))];
+            enforce_logup_rows(
+                query_rows[0][0].cs(),
+                &table_rows,
+                &query_rows,
+                &beta,
+                &coeffs,
+            )
+        }
+    }
+
+    #[derive(Clone)]
+    struct DuplicateTableRowsCircuit {
+        beta: Fr,
+        alpha: Fr,
+    }
+
+    impl ConstraintSynthesizer<Fr> for DuplicateTableRowsCircuit {
+        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
+            let table_rows = vec![
+                vec![
+                    FpVar::Constant(Fr::from(0u64)),
+                    FpVar::Constant(Fr::from(10u64)),
+                ],
+                vec![
+                    FpVar::Constant(Fr::from(0u64)),
+                    FpVar::Constant(Fr::from(10u64)),
+                ],
+            ];
+            let query_rows = vec![vec![
+                FpVar::new_input(cs.clone(), || Ok(Fr::from(0u64)))?,
+                FpVar::new_witness(cs.clone(), || Ok(Fr::from(10u64)))?,
+            ]];
+
+            let beta = FpVar::new_input(cs.clone(), || Ok(self.beta))?;
+            let alpha = FpVar::new_input(cs, || Ok(self.alpha))?;
+            let coeffs = vec![alpha, FpVar::Constant(Fr::from(1u64))];
+            enforce_logup_rows(
+                query_rows[0][0].cs(),
+                &table_rows,
+                &query_rows,
+                &beta,
+                &coeffs,
+            )
+        }
+    }
+
+    #[derive(Clone)]
+    struct LookupScaleCircuit {
+        table: Vec<Fr>,
+        query_indices: Vec<usize>,
+        query_values: Vec<Fr>,
+        alpha: Fr,
+        beta: Fr,
+    }
+
+    impl ConstraintSynthesizer<Fr> for LookupScaleCircuit {
+        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
+            let table_vars = Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.table.clone()))?;
+            let query_index_vars = Vec::<FpVar<Fr>>::new_input(cs.clone(), || {
+                Ok(self
+                    .query_indices
+                    .iter()
+                    .map(|&i| Fr::from(i as u64))
+                    .collect::<Vec<_>>())
+            })?;
+            let query_value_vars =
+                Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(self.query_values.clone()))?;
+            let alpha = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.alpha))?;
+            let beta = FpVar::<Fr>::new_input(cs, || Ok(self.beta))?;
+
+            enforce_lookup_vector_indexing(
+                alpha.cs(),
+                &table_vars,
+                &query_index_vars,
+                &query_value_vars,
+                &alpha,
+                &beta,
+            )
+        }
+    }
+
     #[test]
     fn test_simple_logup_lookup_circuit() -> Result<(), SynthesisError> {
         let circuit = SimpleLookupCircuit {
-            table: vec![Fr::from(3u64), Fr::from(7u64), Fr::from(11u64), Fr::from(19u64)],
-            entries: vec![Fr::from(7u64), Fr::from(19u64), Fr::from(7u64)],
+            table: vec_fr(&[3, 7, 11, 19]),
+            entries: vec_fr(&[7, 19, 7]),
             beta: Fr::from(13u64),
         };
 
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        circuit.generate_constraints(cs.clone())?;
-
-        assert!(cs.is_satisfied()?);
-        let num_constraints = cs.num_constraints();
+        let num_constraints = assert_circuit_satisfied(circuit)?;
         assert!(num_constraints > 0);
         eprintln!("simple_logup_lookup constraints = {}", num_constraints);
-
         Ok(())
     }
 
     #[test]
     fn test_vector_index_lookup_circuit() -> Result<(), SynthesisError> {
-        let table = vec![
-            Fr::from(10u64),
-            Fr::from(20u64),
-            Fr::from(30u64),
-            Fr::from(40u64),
-            Fr::from(50u64),
-        ];
+        let table = vec_fr(&[10, 20, 30, 40, 50]);
         let query_indices = vec![0usize, 3usize, 1usize, 4usize, 3usize];
-        let query_values = query_indices
-            .iter()
-            .map(|&i| table[i])
-            .collect::<Vec<_>>();
+        let query_values = query_indices.iter().map(|&i| table[i]).collect::<Vec<_>>();
 
         let circuit = VectorIndexLookupCircuit {
             table,
@@ -374,29 +479,17 @@ mod tests {
             beta: Fr::from(29u64),
         };
 
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        circuit.generate_constraints(cs.clone())?;
-
-        assert!(cs.is_satisfied()?);
-        let num_constraints = cs.num_constraints();
+        let num_constraints = assert_circuit_satisfied(circuit)?;
         assert!(num_constraints > 0);
         eprintln!("vector_index_lookup constraints = {}", num_constraints);
-
         Ok(())
     }
 
     #[test]
     fn test_vector_index_lookup_circuit_rejects_wrong_value() {
-        let table = vec![
-            Fr::from(10u64),
-            Fr::from(20u64),
-            Fr::from(30u64),
-            Fr::from(40u64),
-            Fr::from(50u64),
-        ];
+        let table = vec_fr(&[10, 20, 30, 40, 50]);
         let query_indices = vec![0usize, 3usize, 1usize, 4usize, 3usize];
         let mut query_values = query_indices.iter().map(|&i| table[i]).collect::<Vec<_>>();
-        // index=3의 정답은 40인데, 의도적으로 오답 41을 넣는다.
         query_values[1] = Fr::from(41u64);
 
         let circuit = VectorIndexLookupCircuit {
@@ -414,38 +507,6 @@ mod tests {
 
     #[test]
     fn test_enforce_logup_rows_rejects_query_not_in_table() {
-        #[derive(Clone)]
-        struct QueryNotInTableCircuit {
-            beta: Fr,
-            alpha: Fr,
-        }
-
-        impl ConstraintSynthesizer<Fr> for QueryNotInTableCircuit {
-            fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
-                // table rows: [idx, val]
-                let table_rows = vec![
-                    vec![FpVar::Constant(Fr::from(0u64)), FpVar::Constant(Fr::from(10u64))],
-                    vec![FpVar::Constant(Fr::from(1u64)), FpVar::Constant(Fr::from(20u64))],
-                ];
-                // query row [1, 999] 는 table에 없음
-                let query_rows = vec![vec![
-                    FpVar::new_input(cs.clone(), || Ok(Fr::from(1u64)))?,
-                    FpVar::new_witness(cs.clone(), || Ok(Fr::from(999u64)))?,
-                ]];
-
-                let beta = FpVar::new_input(cs.clone(), || Ok(self.beta))?;
-                let alpha = FpVar::new_input(cs, || Ok(self.alpha))?;
-                let coeffs = vec![alpha, FpVar::Constant(Fr::from(1u64))];
-                enforce_logup_rows(
-                    query_rows[0][0].cs(),
-                    &table_rows,
-                    &query_rows,
-                    &beta,
-                    &coeffs,
-                )
-            }
-        }
-
         let circuit = QueryNotInTableCircuit {
             beta: Fr::from(13u64),
             alpha: Fr::from(17u64),
@@ -457,37 +518,6 @@ mod tests {
 
     #[test]
     fn test_enforce_logup_rows_rejects_duplicate_table_rows() {
-        #[derive(Clone)]
-        struct DuplicateTableRowsCircuit {
-            beta: Fr,
-            alpha: Fr,
-        }
-
-        impl ConstraintSynthesizer<Fr> for DuplicateTableRowsCircuit {
-            fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
-                // duplicate row [0,10] intentionally.
-                let table_rows = vec![
-                    vec![FpVar::Constant(Fr::from(0u64)), FpVar::Constant(Fr::from(10u64))],
-                    vec![FpVar::Constant(Fr::from(0u64)), FpVar::Constant(Fr::from(10u64))],
-                ];
-                let query_rows = vec![vec![
-                    FpVar::new_input(cs.clone(), || Ok(Fr::from(0u64)))?,
-                    FpVar::new_witness(cs.clone(), || Ok(Fr::from(10u64)))?,
-                ]];
-
-                let beta = FpVar::new_input(cs.clone(), || Ok(self.beta))?;
-                let alpha = FpVar::new_input(cs, || Ok(self.alpha))?;
-                let coeffs = vec![alpha, FpVar::Constant(Fr::from(1u64))];
-                enforce_logup_rows(
-                    query_rows[0][0].cs(),
-                    &table_rows,
-                    &query_rows,
-                    &beta,
-                    &coeffs,
-                )
-            }
-        }
-
         let circuit = DuplicateTableRowsCircuit {
             beta: Fr::from(13u64),
             alpha: Fr::from(17u64),
@@ -495,5 +525,29 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let res = circuit.generate_constraints(cs);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_lookup_len_1024_with_128_indices_constraint_count() -> Result<(), SynthesisError> {
+        let table = (0..1024)
+            .map(|i| Fr::from((10000 + i) as u64))
+            .collect::<Vec<_>>();
+        let query_indices = (0..128).map(|j| (j * 7 + 13) % 1024).collect::<Vec<_>>();
+        let query_values = query_indices.iter().map(|&i| table[i]).collect::<Vec<_>>();
+
+        let circuit = LookupScaleCircuit {
+            table,
+            query_indices,
+            query_values,
+            alpha: Fr::from(17u64),
+            beta: Fr::from(29u64),
+        };
+
+        let num_constraints = assert_circuit_satisfied(circuit)?;
+        eprintln!(
+            "lookup_len_1024_with_128_indices constraints = {}",
+            num_constraints
+        );
+        Ok(())
     }
 }

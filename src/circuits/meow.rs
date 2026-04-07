@@ -11,33 +11,41 @@ use ark_std::{
 use ndarray::Array2;
 
 use crate::circuits::gadgets::{
-    linear_code::reed_solomon::ReedSolomonCode,
+    linear_code::constraints::ProbabilisticEncodingTestGadget,
+    linear_code::reed_solomon::constraints::ReedSolomonGadget,
+    linear_code::reed_solomon::ReedSolomonCode, linear_code::LinearCode,
     lookup::logup::constraints::enforce_lookup_vector_indexing,
 };
 
 #[derive(Debug, Clone)]
 pub struct Meow<F: PrimeField> {
-    // Public Input
+    // Public challenge used in lookup row packing.
     pub r: Option<F>,
 
-    // Committed Witness
+    // Base matrices (flattened row-major, size k*k).
     pub a: Option<Vec<F>>,
     pub b: Option<Vec<F>>,
     pub c: Option<Vec<F>>,
 
+    // Reed-Solomon encodings of A/B/C rows (flattened, size k*n each).
     pub encoded_a: Option<Vec<F>>,
     pub encoded_b: Option<Vec<F>>,
     pub encoded_c: Option<Vec<F>>,
 
-    pub r_a: Option<Vec<F>>,
-    pub r_ab: Option<Vec<F>>,
-    pub r_c: Option<Vec<F>>,
+    // Folded vectors for Freivalds-style checks.
+    pub r_a: Option<Vec<F>>,  // r_a= a * r (folded by inner product with r).
+    pub r_ab: Option<Vec<F>>, // r_ab = (r_a) * b (folded product of r_a and b).
+    pub r_c: Option<Vec<F>>,  // r_c = (r_a) * c (folded product of r_a and c).
 
+    // Public evaluation point for RS probabilistic encoding tests and LogUp.
     pub evaluation_point: Option<F>,
+
+    // Encoded folded vectors (lookup tables, size n).
     pub encoded_r_a: Option<Vec<F>>,
     pub encoded_r_ab: Option<Vec<F>>,
     pub encoded_r_c: Option<Vec<F>>,
 
+    // Queried values opened from encoded_r_* at `queries`.
     pub target_encoded_r_a: Option<Vec<F>>,
     pub target_encoded_r_ab: Option<Vec<F>>,
     pub target_encoded_r_c: Option<Vec<F>>,
@@ -57,7 +65,8 @@ impl<F: PrimeField> Meow<F> {
         let a = Array2::from_shape_vec((k, k), raw_a.clone()).unwrap();
         let b = Array2::from_shape_vec((k, k), raw_b.clone()).unwrap();
         let c = a * b;
-        let raw_c = c.into_raw_vec();
+        let (raw_c, offset) = c.into_raw_vec_and_offset();
+        debug_assert_eq!(offset, Some(0));
         let rs_code = ReedSolomonCode::<F>::new(k, n);
         Self {
             r: Some(r),
@@ -110,6 +119,7 @@ impl<F: PrimeField> Meow<F> {
     }
 
     fn derive_targets(values: &[F], queries: &[usize]) -> Result<Vec<F>, SynthesisError> {
+        // Convenience witness builder: derive opened values from (table, indices).
         let mut out = Vec::with_capacity(queries.len());
         for &q in queries {
             let v = values.get(q).ok_or(SynthesisError::AssignmentMissing)?;
@@ -121,47 +131,76 @@ impl<F: PrimeField> Meow<F> {
 
 impl<F: PrimeField> ConstraintSynthesizer<F> for Meow<F> {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> R1CSResult<()> {
-        let r_val = self.r;
-        let evaluation_point_val = self.evaluation_point;
-        let encoded_r_a_val = self.encoded_r_a;
-        let encoded_r_ab_val = self.encoded_r_ab;
-        let encoded_r_c_val = self.encoded_r_c;
-        let target_encoded_r_a_val = self.target_encoded_r_a;
-        let target_encoded_r_ab_val = self.target_encoded_r_ab;
-        let target_encoded_r_c_val = self.target_encoded_r_c;
-        let queries_val = self.queries;
-        let num_queries = self.num_queries;
+        let Meow {
+            r,
+            a,
+            b,
+            c,
+            encoded_a,
+            encoded_b,
+            encoded_c,
+            r_a: _,
+            r_ab: _,
+            r_c: _,
+            evaluation_point,
+            encoded_r_a,
+            encoded_r_ab,
+            encoded_r_c,
+            target_encoded_r_a,
+            target_encoded_r_ab,
+            target_encoded_r_c,
+            num_queries,
+            queries,
+            rs_code,
+        } = self;
 
-        // Public random challenge used to pack (index, value) pairs.
-        let r = FpVar::new_input(cs.clone(), || {
-            r_val.ok_or(SynthesisError::AssignmentMissing)
+        // Keep copies for target-derivation closures without re-borrow issues.
+        let encoded_r_a_for_target = encoded_r_a.clone();
+        let encoded_r_ab_for_target = encoded_r_ab.clone();
+        let encoded_r_c_for_target = encoded_r_c.clone();
+        let queries_for_target = queries.clone();
+
+        // Public inputs.
+        let r = FpVar::new_input(cs.clone(), || r.ok_or(SynthesisError::AssignmentMissing))?;
+
+        let beta = FpVar::new_input(cs.clone(), || {
+            evaluation_point.ok_or(SynthesisError::AssignmentMissing)
         })?;
 
-        // Public lookup challenge (beta in LogUp relation).
-        let beta = FpVar::new_input(cs.clone(), || {
-            evaluation_point_val.ok_or(SynthesisError::AssignmentMissing)
+        // Witness vectors and tables.
+        let a = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
+            a.clone().ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let b = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
+            b.clone().ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let c = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
+            c.clone().ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let encoded_a = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
+            encoded_a.clone().ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let encoded_b = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
+            encoded_b.clone().ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let encoded_c = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
+            encoded_c.clone().ok_or(SynthesisError::AssignmentMissing)
         })?;
 
         let encoded_r_a = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
-            encoded_r_a_val
-                .clone()
-                .ok_or(SynthesisError::AssignmentMissing)
+            encoded_r_a.clone().ok_or(SynthesisError::AssignmentMissing)
         })?;
         let encoded_r_ab = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
-            encoded_r_ab_val
+            encoded_r_ab
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)
         })?;
         let encoded_r_c = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
-            encoded_r_c_val
-                .clone()
-                .ok_or(SynthesisError::AssignmentMissing)
+            encoded_r_c.clone().ok_or(SynthesisError::AssignmentMissing)
         })?;
 
         let query_indices = Vec::<FpVar<F>>::new_input(cs.clone(), || {
-            let qs = queries_val
-                .clone()
-                .ok_or(SynthesisError::AssignmentMissing)?;
+            let qs = queries.clone().ok_or(SynthesisError::AssignmentMissing)?;
             if qs.len() != num_queries {
                 return Err(SynthesisError::AssignmentMissing);
             }
@@ -171,47 +210,64 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for Meow<F> {
                 .collect::<Vec<_>>())
         })?;
 
-        // Queried values can be provided directly or derived from the witness table
-        // to simplify witness construction.
         let target_encoded_r_a = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
-            if let Some(v) = target_encoded_r_a_val.clone() {
+            // Allow explicit target witness, or derive from table+queries.
+            if let Some(v) = target_encoded_r_a.clone() {
                 return Ok(v);
             }
-            let table = encoded_r_a_val
+            let table = encoded_r_a_for_target
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)?;
-            let qs = queries_val
+            let qs = queries_for_target
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)?;
             Self::derive_targets(&table, &qs)
         })?;
         let target_encoded_r_ab = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
-            if let Some(v) = target_encoded_r_ab_val.clone() {
+            if let Some(v) = target_encoded_r_ab.clone() {
                 return Ok(v);
             }
-            let table = encoded_r_ab_val
+            let table = encoded_r_ab_for_target
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)?;
-            let qs = queries_val
+            let qs = queries_for_target
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)?;
             Self::derive_targets(&table, &qs)
         })?;
         let target_encoded_r_c = Vec::<FpVar<F>>::new_witness(cs.clone(), || {
-            if let Some(v) = target_encoded_r_c_val.clone() {
+            if let Some(v) = target_encoded_r_c.clone() {
                 return Ok(v);
             }
-            let table = encoded_r_c_val
+            let table = encoded_r_c_for_target
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)?;
-            let qs = queries_val
+            let qs = queries_for_target
                 .clone()
                 .ok_or(SynthesisError::AssignmentMissing)?;
             Self::derive_targets(&table, &qs)
         })?;
 
-        // Go meow.go의 t.Lookup(indices[i])에 해당:
-        // EncX/EncYZ 인덱싱을 lookup argument로 강제한다.
+        let k = rs_code.message_length();
+        let n = rs_code.codeword_length();
+
+        // Enforce each row of encoded_{a,b,c} is a valid RS encoding of {a,b,c}.
+        let rs_gadget = ReedSolomonGadget::<F, FpVar<F>>::new_witness(cs.clone(), || Ok(rs_code))?;
+        for i in 0..k {
+            let msg_a = &a[i * k..(i + 1) * k];
+            let msg_b = &b[i * k..(i + 1) * k];
+            let msg_c = &c[i * k..(i + 1) * k];
+            let enc_a_row = &encoded_a[i * n..(i + 1) * n];
+            let enc_b_row = &encoded_b[i * n..(i + 1) * n];
+            let enc_c_row = &encoded_c[i * n..(i + 1) * n];
+
+            rs_gadget.is_valid(msg_a, enc_a_row, &beta)?;
+            rs_gadget.is_valid(msg_b, enc_b_row, &beta)?;
+            rs_gadget.is_valid(msg_c, enc_c_row, &beta)?;
+        }
+
+        // LogUp-based vector indexing checks:
+        // target_encoded_r_* must be openings of encoded_r_* at query_indices.
         enforce_lookup_vector_indexing(
             cs.clone(),
             &encoded_r_a,
@@ -229,7 +285,6 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for Meow<F> {
             &beta,
         )?;
 
-        // C also opens at the same indices; keep it aligned with AB side.
         enforce_lookup_vector_indexing(
             cs,
             &encoded_r_c,
@@ -239,6 +294,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for Meow<F> {
             &beta,
         )?;
         for (ab_i, c_i) in target_encoded_r_ab.iter().zip(target_encoded_r_c.iter()) {
+            // In meow relation, rAB and rC openings must match per queried index.
             ab_i.enforce_equal(c_i)?;
         }
 

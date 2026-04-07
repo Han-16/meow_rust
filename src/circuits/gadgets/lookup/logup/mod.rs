@@ -2,10 +2,7 @@ pub mod constraints;
 
 use super::*;
 
-use ark_std::{
-    Zero,
-    rand::{CryptoRng, RngCore},
-};
+use ark_std::rand::{CryptoRng, RngCore};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -63,23 +60,32 @@ impl<F: Field> LookupArgument<F> for LogUp<F> {
     /// Prepares the lookup argument for use in a circuit.
     /// We assume that the table is already sorted.
     fn prepare(&mut self) -> Result<(), Error> {
-        let mut table = &self.tables[0][..];
-        let mut entry = self.entries.first().unwrap().to_owned();
+        let table = self
+            .tables
+            .first()
+            .ok_or_else(|| Error::EntryNotFound("no table".to_string()))?;
+        let mut entry = self.entries.first().cloned().unwrap_or_default();
+        self.counts.fill(0);
         entry.sort();
 
         #[cfg(not(feature = "parallel"))]
         {
-            let mut idx = 0;
-            while 0 < entry.len() {
-                let table_find = table.partition_point(|v| v <= &entry[0]);
-                if table_find >= table.len() {
-                    return Err(Error::EntryNotFound(entry[0].to_string()));
+            let mut table_idx = 0usize;
+            let mut entry_idx = 0usize;
+            while entry_idx < entry.len() {
+                let target = entry[entry_idx];
+                while table_idx < table.len() && table[table_idx] < target {
+                    table_idx += 1;
                 }
-                let entry_find = entry.partition_point(|v| v <= &entry[0]);
-                idx += table_find;
-                self.counts[idx] = entry_find;
-                table = &table[table_find..];
-                entry = entry.split_off(entry_find);
+                if table_idx == table.len() || table[table_idx] != target {
+                    return Err(Error::EntryNotFound(target.to_string()));
+                }
+                let mut cnt = 0usize;
+                while entry_idx + cnt < entry.len() && entry[entry_idx + cnt] == target {
+                    cnt += 1;
+                }
+                self.counts[table_idx] = cnt;
+                entry_idx += cnt;
             }
         }
         #[cfg(feature = "parallel")]

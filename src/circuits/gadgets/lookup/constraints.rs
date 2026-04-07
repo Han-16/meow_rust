@@ -1,10 +1,7 @@
 use ark_ff::Field;
-use ark_r1cs_std::{
-    alloc::{AllocVar, AllocationMode},
-    fields::FieldVar,
-};
+use ark_r1cs_std::fields::FieldVar;
 use ark_relations::r1cs::{Namespace, SynthesisError};
-use ark_std::{borrow::Borrow, marker::PhantomData};
+use ark_std::marker::PhantomData;
 
 #[derive(Clone)]
 pub struct ColumnVar<F: Field, FV: FieldVar<F, F::BasePrimeField>> {

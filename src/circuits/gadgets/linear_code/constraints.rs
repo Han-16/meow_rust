@@ -1,5 +1,5 @@
 use ark_ff::PrimeField;
-use ark_r1cs_std::{R1CSVar, eq::EqGadget, fields::FieldVar, prelude::Boolean};
+use ark_r1cs_std::{eq::EqGadget, fields::FieldVar, R1CSVar};
 use ark_relations::r1cs::SynthesisError;
 use ark_std::fmt::Debug;
 

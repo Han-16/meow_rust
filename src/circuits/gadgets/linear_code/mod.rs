@@ -3,9 +3,9 @@ use ark_ff::Field;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
     cfg_into_iter,
-    One, Zero,
     fmt::Debug,
     rand::{CryptoRng, RngCore},
+    One, Zero,
 };
 
 pub mod constraints;
@@ -73,7 +73,7 @@ pub trait ProbailisticEncodingTest: LinearCode {
     fn evaluate_message(&self, message: &[Self::Alphabet], point: &Self::Point) -> Self::Alphabet;
 
     fn evaluate_codeword(&self, codeword: &[Self::Alphabet], point: &Self::Point)
-    -> Self::Alphabet;
+        -> Self::Alphabet;
 
     fn is_valid(
         &self,

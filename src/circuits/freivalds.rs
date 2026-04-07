@@ -31,7 +31,8 @@ impl<F: PrimeField> Freivalds<F> {
         let a = Array2::from_shape_vec((n, k), raw_a.clone()).unwrap();
         let b = Array2::from_shape_vec((k, m), raw_b.clone()).unwrap();
         let c = a * b;
-        let raw_c = c.into_raw_vec();
+        let (raw_c, offset) = c.into_raw_vec_and_offset();
+        debug_assert_eq!(offset, Some(0));
 
         Self {
             r: Some(r),
@@ -92,10 +93,9 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for Freivalds<F> {
         let r_ab = r_a * &b;
         let r_c = power_of_r * &c;
 
-        let _ = r_ab
-            .iter()
-            .zip(&r_c)
-            .map(|(r_ab_i, r_c_i)| r_ab_i.enforce_equal(r_c_i));
+        for (r_ab_i, r_c_i) in r_ab.iter().zip(&r_c) {
+            r_ab_i.enforce_equal(r_c_i)?;
+        }
 
         Ok(())
     }
