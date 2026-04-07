@@ -216,208 +216,115 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_crypto_primitives::sponge::{
-        poseidon::{traits::find_poseidon_ark_and_mds, PoseidonConfig, PoseidonSponge},
-        CryptographicSponge,
-    };
-    use ark_ff::PrimeField;
     use ark_relations::r1cs::{ConstraintSystem, SynthesisError};
+    use std::{path::Path, thread};
 
     use crate::circuits::gadgets::linear_code::{reed_solomon::ReedSolomonCode, LinearCode};
-    use std::{collections::HashMap, fs};
+    use crate::crypto::hash::{poseidon_hash_elements_bn254, poseidon_sponge_config_bn254};
+    use crate::utils::{benchmark_io::append_csv_row, env::read_bench_env_params};
 
-    fn parse_env_file(path: &str) -> Result<HashMap<String, String>, SynthesisError> {
-        let text = fs::read_to_string(path).map_err(|_| SynthesisError::AssignmentMissing)?;
-        let mut out = HashMap::new();
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let (k, v) = trimmed
-                .split_once('=')
-                .ok_or(SynthesisError::AssignmentMissing)?;
-            out.insert(k.trim().to_string(), v.trim().to_string());
-        }
-        Ok(out)
-    }
+    const STACK_SIZE: usize = 64 * 1024 * 1024;
 
-    fn parse_circuit_sizes_from_env() -> Result<(usize, usize, usize), SynthesisError> {
-        let env = parse_env_file(".env")?;
-        let log_k: usize = env
-            .get("LOG_K")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        let l: usize = env
-            .get("L")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        let rho: f64 = env
-            .get("RHO")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        if !(rho > 0.0) {
-            return Err(SynthesisError::AssignmentMissing);
-        }
+    fn count_constraints(k: usize, n: usize, l: usize) -> Result<usize, SynthesisError> {
+        let handle = thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(move || -> Result<usize, SynthesisError> {
+                let poseidon_cfg = poseidon_sponge_config_bn254();
+                let roots = [
+                    Fr::from(11u64),
+                    Fr::from(22u64),
+                    Fr::from(33u64),
+                    Fr::from(44u64),
+                    Fr::from(55u64),
+                ];
+                let cm_abc = poseidon_hash_elements_bn254(&poseidon_cfg, &roots[0..3]);
+                let cm_xyz = poseidon_hash_elements_bn254(&poseidon_cfg, &roots[3..5]);
 
-        let k = 1usize << log_k;
-        let n_float = (k as f64) / rho;
-        let n = n_float.round() as usize;
-        if n == 0 || l > n {
-            return Err(SynthesisError::AssignmentMissing);
-        }
-        Ok((k, n, l))
-    }
+                let mut challenge_r = vec![Fr::from(0u64); k];
+                challenge_r[0] = Fr::from(1u64);
 
-    fn parse_circuit_range_from_env() -> Result<(usize, usize, usize, f64), SynthesisError> {
-        let env = parse_env_file(".env")?;
-        let log_k_min: usize = env
-            .get("LOG_K_MIN")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        let log_k_max: usize = env
-            .get("LOG_K_MAX")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        let l: usize = env
-            .get("L")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        let rho: f64 = env
-            .get("RHO")
-            .ok_or(SynthesisError::AssignmentMissing)?
-            .parse()
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        if !(rho > 0.0) || log_k_min > log_k_max {
-            return Err(SynthesisError::AssignmentMissing);
-        }
-        Ok((log_k_min, log_k_max, l, rho))
-    }
+                let rs = ReedSolomonCode::<Fr>::new(k, n);
+                let mut vec_x = vec![Fr::from(0u64); k];
+                vec_x[0] = Fr::from(1u64);
+                let mut vec_yz = vec![Fr::from(0u64); k];
+                vec_yz[0] = Fr::from(7u64);
+                let enc_x = rs
+                    .encode(&vec_x)
+                    .map_err(|_| SynthesisError::AssignmentMissing)?;
+                let enc_yz = rs
+                    .encode(&vec_yz)
+                    .map_err(|_| SynthesisError::AssignmentMissing)?;
 
-    fn poseidon_bn254_cfg() -> PoseidonConfig<Fr> {
-        let rate = 2usize;
-        let full_rounds = 8usize;
-        let partial_rounds = 56usize;
-        let alpha = 5u64;
-        let (ark, mds) = find_poseidon_ark_and_mds::<Fr>(
-            Fr::MODULUS_BIT_SIZE as u64,
-            rate,
-            full_rounds as u64,
-            partial_rounds as u64,
-            0,
-        );
-        PoseidonConfig {
-            full_rounds,
-            partial_rounds,
-            alpha,
-            ark,
-            mds,
-            rate,
-            capacity: 1,
-        }
-    }
+                let indices_usize = (0..l).collect::<Vec<_>>();
+                let indices = indices_usize
+                    .iter()
+                    .map(|&i| Fr::from(i as u64))
+                    .collect::<Vec<_>>();
+                let target_enc_x = indices_usize.iter().map(|&i| enc_x[i]).collect::<Vec<_>>();
+                let target_enc_yz = indices_usize.iter().map(|&i| enc_yz[i]).collect::<Vec<_>>();
 
-    fn poseidon_hash_native(cfg: &PoseidonConfig<Fr>, inputs: &[Fr]) -> Result<Fr, SynthesisError> {
-        let mut sponge = PoseidonSponge::<Fr>::new(cfg);
-        sponge.absorb(&inputs.to_vec());
-        Ok(sponge.squeeze_field_elements::<Fr>(1)[0])
-    }
+                let mut cols_enc_a = vec![vec![Fr::from(0u64); k]; l];
+                let mut cols_enc_b = vec![vec![Fr::from(0u64); k]; l];
+                let mut cols_enc_c = vec![vec![Fr::from(0u64); k]; l];
+                for i in 0..l {
+                    cols_enc_a[i][0] = target_enc_x[i];
+                    cols_enc_b[i][0] = target_enc_yz[i];
+                    cols_enc_c[i][0] = target_enc_yz[i];
+                }
 
-    fn build_satisfiable_meow_circuit(
-        k: usize,
-        n: usize,
-        l: usize,
-        poseidon_cfg: PoseidonConfig<Fr>,
-    ) -> Result<Meow<Fr>, SynthesisError> {
-        let roots = [
-            Fr::from(11u64),
-            Fr::from(22u64),
-            Fr::from(33u64),
-            Fr::from(44u64),
-            Fr::from(55u64),
-        ];
-        let cm_abc = poseidon_hash_native(&poseidon_cfg, &roots[0..3])?;
-        let cm_xyz = poseidon_hash_native(&poseidon_cfg, &roots[3..5])?;
+                let circuit = Meow::<Fr> {
+                    k,
+                    n,
+                    roots: Some(roots),
+                    cm_abc: Some(cm_abc),
+                    cm_xyz: Some(cm_xyz),
+                    challenge_r: Some(challenge_r),
+                    indices: Some(indices),
+                    lookup_index_challenge: Some(Fr::from(1u64)),
+                    lookup_logup_challenge: Some(Fr::from((n as u64) + 1000)),
+                    rs_point_x: Some(Fr::from((n as u64) + 2001)),
+                    rs_point_yz: Some(Fr::from((n as u64) + 3001)),
+                    poseidon_config: Some(poseidon_cfg),
+                    cols_enc_a: Some(cols_enc_a),
+                    cols_enc_b: Some(cols_enc_b),
+                    cols_enc_c: Some(cols_enc_c),
+                    vec_x: Some(vec_x),
+                    vec_yz: Some(vec_yz),
+                    enc_x: Some(enc_x),
+                    enc_yz: Some(enc_yz),
+                    target_enc_x: Some(target_enc_x),
+                    target_enc_yz: Some(target_enc_yz),
+                };
 
-        let lookup_alpha = Fr::from(1u64);
-        let lookup_beta = Fr::from((n as u64) + 1000);
-
-        let mut challenge_r = vec![Fr::from(0u64); k];
-        challenge_r[0] = Fr::from(1u64);
-
-        let rs = ReedSolomonCode::<Fr>::new(k, n);
-        let mut vec_x = vec![Fr::from(0u64); k];
-        vec_x[0] = Fr::from(1u64);
-        let mut vec_yz = vec![Fr::from(0u64); k];
-        vec_yz[0] = Fr::from(7u64);
-        let enc_x = rs
-            .encode(&vec_x)
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-        let enc_yz = rs
-            .encode(&vec_yz)
+                let cs = ConstraintSystem::<Fr>::new_ref();
+                circuit.generate_constraints(cs.clone())?;
+                if !cs.is_satisfied()? {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                Ok(cs.num_constraints())
+            })
             .map_err(|_| SynthesisError::AssignmentMissing)?;
 
-        let indices_usize = (0..l).collect::<Vec<_>>();
-        let indices = indices_usize
-            .iter()
-            .map(|&i| Fr::from(i as u64))
-            .collect::<Vec<_>>();
-        let target_enc_x = indices_usize.iter().map(|&i| enc_x[i]).collect::<Vec<_>>();
-        let target_enc_yz = indices_usize.iter().map(|&i| enc_yz[i]).collect::<Vec<_>>();
-
-        let mut cols_enc_a = vec![vec![Fr::from(0u64); k]; l];
-        let mut cols_enc_b = vec![vec![Fr::from(0u64); k]; l];
-        let mut cols_enc_c = vec![vec![Fr::from(0u64); k]; l];
-        for i in 0..l {
-            cols_enc_a[i][0] = target_enc_x[i];
-            cols_enc_b[i][0] = target_enc_yz[i];
-            cols_enc_c[i][0] = target_enc_yz[i];
-        }
-
-        Ok(Meow::<Fr> {
-            k,
-            n,
-            roots: Some(roots),
-            cm_abc: Some(cm_abc),
-            cm_xyz: Some(cm_xyz),
-            challenge_r: Some(challenge_r),
-            indices: Some(indices),
-            lookup_index_challenge: Some(lookup_alpha),
-            lookup_logup_challenge: Some(lookup_beta),
-            rs_point_x: Some(Fr::from((n as u64) + 2001)),
-            rs_point_yz: Some(Fr::from((n as u64) + 3001)),
-            poseidon_config: Some(poseidon_cfg),
-            cols_enc_a: Some(cols_enc_a),
-            cols_enc_b: Some(cols_enc_b),
-            cols_enc_c: Some(cols_enc_c),
-            vec_x: Some(vec_x),
-            vec_yz: Some(vec_yz),
-            enc_x: Some(enc_x),
-            enc_yz: Some(enc_yz),
-            target_enc_x: Some(target_enc_x),
-            target_enc_yz: Some(target_enc_yz),
-        })
+        handle
+            .join()
+            .map_err(|_| SynthesisError::AssignmentMissing)?
     }
 
     #[test]
     fn test_meow_constraint_count_from_env() -> Result<(), SynthesisError> {
-        let (k, n, l) = parse_circuit_sizes_from_env()?;
-        let circuit = build_satisfiable_meow_circuit(k, n, l, poseidon_bn254_cfg())?;
+        let params =
+            read_bench_env_params(".env").map_err(|_| SynthesisError::AssignmentMissing)?;
+        let log_k = params.log_k;
+        let l = params.l;
+        let rho = params.rho;
 
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        circuit.generate_constraints(cs.clone())?;
-        let is_sat = cs.is_satisfied()?;
-        if !is_sat {
-            eprintln!("unsatisfied: {:?}", cs.which_is_unsatisfied()?);
+        let k = 1usize << log_k;
+        let n = ((k as f64) / rho).round() as usize;
+        if n == 0 || l > n {
+            return Err(SynthesisError::AssignmentMissing);
         }
-        assert!(is_sat);
-        let num_constraints = cs.num_constraints();
+
+        let num_constraints = count_constraints(k, n, l)?;
         assert!(num_constraints > 0);
         eprintln!(
             "meow constraints (from .env): K={}, N={}, L={} => {}",
@@ -428,27 +335,38 @@ mod tests {
 
     #[test]
     fn test_meow_constraint_count_range_from_env() -> Result<(), SynthesisError> {
-        let (log_k_min, log_k_max, l, rho) = parse_circuit_range_from_env()?;
+        let params =
+            read_bench_env_params(".env").map_err(|_| SynthesisError::AssignmentMissing)?;
+        let log_k_min = params.log_k_min;
+        let log_k_max = params.log_k_max;
+        let l = params.l;
+        let rho = params.rho;
+
+        let csv_path = Path::new("benchmark").join("meow_constraints.csv");
         for log_k in log_k_min..=log_k_max {
             let k = 1usize << log_k;
             let n = ((k as f64) / rho).round() as usize;
             if n == 0 || l > n {
                 return Err(SynthesisError::AssignmentMissing);
             }
+            let constraints = count_constraints(k, n, l)?;
 
-            let circuit = build_satisfiable_meow_circuit(k, n, l, poseidon_bn254_cfg())?;
-            let cs = ConstraintSystem::<Fr>::new_ref();
-            circuit.generate_constraints(cs.clone())?;
-            assert!(cs.is_satisfied()?);
+            let row = [
+                log_k.to_string(),
+                k.to_string(),
+                n.to_string(),
+                l.to_string(),
+                constraints.to_string(),
+            ];
+            append_csv_row(&csv_path, &["log_k", "k", "n", "l", "constraints"], &row)
+                .map_err(|_| SynthesisError::AssignmentMissing)?;
+
             eprintln!(
                 "meow constraints (range/.env): LOG_K={}, K={}, N={}, L={} => {}",
-                log_k,
-                k,
-                n,
-                l,
-                cs.num_constraints()
+                log_k, k, n, l, constraints
             );
         }
+        eprintln!("wrote benchmark csv: {}", csv_path.display());
         Ok(())
     }
 }
