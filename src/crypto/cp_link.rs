@@ -46,6 +46,32 @@ fn weighted_sum(vectors: &[Vec<Fr>], r: Fr) -> Result<Vec<Fr>, CryptoError> {
     Ok(out)
 }
 
+fn append_zero_check_terms(
+    acc: &mut G1Projective,
+    z: &[Fr],
+    t: Fr,
+    r_point: &G1Affine,
+    c_point: &G1Affine,
+    ck: &CommitKey,
+    challenge: Fr,
+    weight: Fr,
+) -> Result<(), CryptoError> {
+    if z.len() != ck.g.len() {
+        return Err(CryptoError::InvalidInputLength(
+            "proof vector and commit key must match",
+        ));
+    }
+
+    for (zj, gj) in z.iter().zip(ck.g.iter()) {
+        *acc += gj.mul_bigint(((*zj) * weight).into_bigint());
+    }
+    *acc += ck.h.mul_bigint((t * weight).into_bigint());
+    *acc += r_point.mul_bigint((-weight).into_bigint());
+    *acc += c_point.mul_bigint((-(weight * challenge)).into_bigint());
+
+    Ok(())
+}
+
 pub fn prove_cp_link<R: Rng>(
     x: &[Fr],
     r1: Fr,
@@ -102,14 +128,33 @@ pub fn verify_cp_link(
     }
 
     let challenge = compute_cp_link_challenge(c1, c2, &proof.r1, &proof.r2);
+    let mut acc1 = G1Projective::zero();
+    append_zero_check_terms(
+        &mut acc1,
+        &proof.z,
+        proof.t1,
+        &proof.r1,
+        c1,
+        ck1,
+        challenge,
+        Fr::one(),
+    )?;
+    if !acc1.is_zero() {
+        return Ok(false);
+    }
 
-    let lhs1 = pedersen_commit_blinded(&proof.z, proof.t1, ck1)?;
-    let rhs1 = (proof.r1.into_group() + c1.mul_bigint(challenge.into_bigint())).into_affine();
-
-    let lhs2 = pedersen_commit_blinded(&proof.z, proof.t2, ck2)?;
-    let rhs2 = (proof.r2.into_group() + c2.mul_bigint(challenge.into_bigint())).into_affine();
-
-    Ok(lhs1 == rhs1 && lhs2 == rhs2)
+    let mut acc2 = G1Projective::zero();
+    append_zero_check_terms(
+        &mut acc2,
+        &proof.z,
+        proof.t2,
+        &proof.r2,
+        c2,
+        ck2,
+        challenge,
+        Fr::one(),
+    )?;
+    Ok(acc2.is_zero())
 }
 
 pub fn verify_cp_links_batched(
@@ -126,6 +171,20 @@ pub fn verify_cp_links_batched(
     if c1s.len() != l || c2s.len() != l || ck2s.len() != l {
         return Err(CryptoError::InvalidInputLength(
             "batch input lengths must match",
+        ));
+    }
+    if proofs.iter().any(|p| p.z.len() != ck1.g.len()) {
+        return Err(CryptoError::InvalidInputLength(
+            "all proofs must match ck1 length",
+        ));
+    }
+    if proofs
+        .iter()
+        .zip(ck2s.iter())
+        .any(|(p, ck2)| p.z.len() != ck2.g.len())
+    {
+        return Err(CryptoError::InvalidInputLength(
+            "proof and ck2 length mismatch",
         ));
     }
 
@@ -160,14 +219,23 @@ pub fn verify_cp_links_batched(
         return Ok(false);
     }
 
+    let mut c2_msm = G1Projective::zero();
+    let mut weight2 = Fr::one();
     for i in 0..l {
-        let ok = verify_cp_link(&c1s[i], &c2s[i], &proofs[i], ck1, &ck2s[i])?;
-        if !ok {
-            return Ok(false);
-        }
+        append_zero_check_terms(
+            &mut c2_msm,
+            &proofs[i].z,
+            proofs[i].t2,
+            &proofs[i].r2,
+            &c2s[i],
+            &ck2s[i],
+            challenges[i],
+            weight2,
+        )?;
+        weight2 *= r;
     }
 
-    Ok(true)
+    Ok(c2_msm.is_zero())
 }
 
 #[cfg(test)]
