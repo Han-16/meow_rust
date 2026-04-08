@@ -1,7 +1,8 @@
 use ark_bn254::{Fr, G1Affine, G1Projective};
-use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
-use ark_ff::{PrimeField, UniformRand, Zero};
+use ark_ec::{scalar_mul::variable_base::ChunkedPippenger, CurveGroup, PrimeGroup};
+use ark_ff::{PrimeField, UniformRand};
 use rand::Rng;
+use rayon::prelude::*;
 
 use crate::crypto::CryptoError;
 
@@ -31,12 +32,12 @@ pub fn pedersen_commit_blinded(
         ));
     }
 
-    let mut acc = G1Projective::zero();
+    let mut msm = ChunkedPippenger::<G1Projective>::with_size(data.len() + 1);
     for (m, g) in data.iter().zip(ck.g.iter()) {
-        acc += g.mul_bigint(m.into_bigint());
+        msm.add(g, m.into_bigint());
     }
-    acc += ck.h.mul_bigint(blinding.into_bigint());
-    Ok(acc.into_affine())
+    msm.add(&ck.h, blinding.into_bigint());
+    Ok(msm.finalize().into_affine())
 }
 
 pub fn batch_pedersen_commit_blinded<R: Rng>(
@@ -53,14 +54,13 @@ pub fn batch_pedersen_commit_blinded<R: Rng>(
         ));
     }
 
-    let mut commitments = Vec::with_capacity(matrix.len());
-    let mut blindings = Vec::with_capacity(matrix.len());
-    for row in matrix {
-        let bl = Fr::rand(rng);
-        let c = pedersen_commit_blinded(row, bl, ck)?;
-        commitments.push(c);
-        blindings.push(bl);
-    }
+    let blindings = (0..matrix.len()).map(|_| Fr::rand(rng)).collect::<Vec<_>>();
+    let commitments = matrix
+        .par_iter()
+        .zip(blindings.par_iter())
+        .map(|(row, bl)| pedersen_commit_blinded(row, *bl, ck))
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok((commitments, blindings))
 }
 
