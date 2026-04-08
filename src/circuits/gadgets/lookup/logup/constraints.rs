@@ -62,8 +62,10 @@ impl<F: Field, FV: FieldVar<F, F::BasePrimeField>> LookupArgumentGadget<F>
         }
 
         // Extract concrete values for witness generation.
-        let table_vals: Result<Vec<F>, _> = cfg_iter!(table_vars).map(|v| v.value()).collect();
-        let entry_vals: Result<Vec<F>, _> = cfg_iter!(entry_vars).map(|v| v.value()).collect();
+        // `FV` may not implement `Sync`, so extracting witness values from vars
+        // must stay sequential even when the `parallel` feature is enabled.
+        let table_vals: Result<Vec<F>, _> = table_vars.iter().map(|v| v.value()).collect();
+        let entry_vals: Result<Vec<F>, _> = entry_vars.iter().map(|v| v.value()).collect();
 
         // Compute multiplicities if concrete values are available.
         // The table is assumed to contain unique elements.
@@ -223,7 +225,11 @@ pub fn enforce_logup_rows<F: PrimeField>(
             .iter()
             .map(|row| row.iter().map(|v| v.value()).collect())
             .collect();
-        compute_counts(&t_vals?, &q_vals?)
+        match (t_vals, q_vals) {
+            (Ok(tv), Ok(qv)) => compute_counts(&tv, &qv),
+            // Setup mode may not provide concrete witness values yet.
+            _ => Ok(vec![F::zero(); table_rows.len()]),
+        }
     })?;
 
     let mut lp = FpVar::<F>::zero();
