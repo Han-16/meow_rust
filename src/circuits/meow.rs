@@ -26,7 +26,7 @@ pub struct Meow<F: PrimeField> {
     pub roots: Option<[F; 5]>, // [A, B, C, X, YZ] merkle roots
     pub cm_abc: Option<F>,
     pub cm_xyz: Option<F>,
-    pub challenge_r: Option<Vec<F>>, // len = K
+    pub challenge_r: Option<F>,      // scalar r
     pub indices: Option<Vec<F>>,     // len = L
     pub lookup_index_challenge: Option<F>,
     pub lookup_logup_challenge: Option<F>,
@@ -110,7 +110,7 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
         let cm_xyz = FpVar::<F>::new_input(cs.clone(), || {
             cm_xyz.ok_or(SynthesisError::AssignmentMissing)
         })?;
-        let challenge_r = Vec::<FpVar<F>>::new_input(cs.clone(), || {
+        let challenge_r = FpVar::<F>::new_input(cs.clone(), || {
             challenge_r.ok_or(SynthesisError::AssignmentMissing)
         })?;
         let indices = Vec::<FpVar<F>>::new_input(cs.clone(), || {
@@ -166,6 +166,14 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
 
         let l = indices.len();
 
+        // Build [1, r, r^2, ...] inside the circuit from scalar r.
+        let mut challenge_r_pows = Vec::with_capacity(k);
+        let mut cur = FpVar::<F>::one();
+        for _ in 0..k {
+            challenge_r_pows.push(cur.clone());
+            cur *= &challenge_r;
+        }
+
         // 1) Lookup constraints (t.Lookup(indices[i]) == target[i]) for X and YZ.
         enforce_lookup_vector_indexing(
             cs.clone(),
@@ -186,9 +194,9 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
 
         // 1-b) Fold checks.
         for i in 0..l {
-            let fold_a = fold(&challenge_r, &cols_enc_a[i])?;
+            let fold_a = fold(&challenge_r_pows, &cols_enc_a[i])?;
             let fold_b = fold(&vec_x, &cols_enc_b[i])?;
-            let fold_c = fold(&challenge_r, &cols_enc_c[i])?;
+            let fold_c = fold(&challenge_r_pows, &cols_enc_c[i])?;
 
             fold_a.enforce_equal(&target_enc_x[i])?;
             fold_b.enforce_equal(&target_enc_yz[i])?;
@@ -216,157 +224,86 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_relations::r1cs::{ConstraintSystem, SynthesisError};
-    use std::{path::Path, thread};
+    use ark_relations::r1cs::ConstraintSystem;
 
     use crate::circuits::gadgets::linear_code::{reed_solomon::ReedSolomonCode, LinearCode};
     use crate::crypto::hash::{poseidon_hash_elements_bn254, poseidon_sponge_config_bn254};
-    use crate::utils::{benchmark_io::append_csv_row, env::read_bench_env_params};
-
-    const STACK_SIZE: usize = 64 * 1024 * 1024;
-
-    fn count_constraints(k: usize, n: usize, l: usize) -> Result<usize, SynthesisError> {
-        let handle = thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(move || -> Result<usize, SynthesisError> {
-                let poseidon_cfg = poseidon_sponge_config_bn254();
-                let roots = [
-                    Fr::from(11u64),
-                    Fr::from(22u64),
-                    Fr::from(33u64),
-                    Fr::from(44u64),
-                    Fr::from(55u64),
-                ];
-                let cm_abc = poseidon_hash_elements_bn254(&poseidon_cfg, &roots[0..3]);
-                let cm_xyz = poseidon_hash_elements_bn254(&poseidon_cfg, &roots[3..5]);
-
-                let mut challenge_r = vec![Fr::from(0u64); k];
-                challenge_r[0] = Fr::from(1u64);
-
-                let rs = ReedSolomonCode::<Fr>::new(k, n);
-                let mut vec_x = vec![Fr::from(0u64); k];
-                vec_x[0] = Fr::from(1u64);
-                let mut vec_yz = vec![Fr::from(0u64); k];
-                vec_yz[0] = Fr::from(7u64);
-                let enc_x = rs
-                    .encode(&vec_x)
-                    .map_err(|_| SynthesisError::AssignmentMissing)?;
-                let enc_yz = rs
-                    .encode(&vec_yz)
-                    .map_err(|_| SynthesisError::AssignmentMissing)?;
-
-                let indices_usize = (0..l).collect::<Vec<_>>();
-                let indices = indices_usize
-                    .iter()
-                    .map(|&i| Fr::from(i as u64))
-                    .collect::<Vec<_>>();
-                let target_enc_x = indices_usize.iter().map(|&i| enc_x[i]).collect::<Vec<_>>();
-                let target_enc_yz = indices_usize.iter().map(|&i| enc_yz[i]).collect::<Vec<_>>();
-
-                let mut cols_enc_a = vec![vec![Fr::from(0u64); k]; l];
-                let mut cols_enc_b = vec![vec![Fr::from(0u64); k]; l];
-                let mut cols_enc_c = vec![vec![Fr::from(0u64); k]; l];
-                for i in 0..l {
-                    cols_enc_a[i][0] = target_enc_x[i];
-                    cols_enc_b[i][0] = target_enc_yz[i];
-                    cols_enc_c[i][0] = target_enc_yz[i];
-                }
-
-                let circuit = Meow::<Fr> {
-                    k,
-                    n,
-                    roots: Some(roots),
-                    cm_abc: Some(cm_abc),
-                    cm_xyz: Some(cm_xyz),
-                    challenge_r: Some(challenge_r),
-                    indices: Some(indices),
-                    lookup_index_challenge: Some(Fr::from(1u64)),
-                    lookup_logup_challenge: Some(Fr::from((n as u64) + 1000)),
-                    rs_point_x: Some(Fr::from((n as u64) + 2001)),
-                    rs_point_yz: Some(Fr::from((n as u64) + 3001)),
-                    poseidon_config: Some(poseidon_cfg),
-                    cols_enc_a: Some(cols_enc_a),
-                    cols_enc_b: Some(cols_enc_b),
-                    cols_enc_c: Some(cols_enc_c),
-                    vec_x: Some(vec_x),
-                    vec_yz: Some(vec_yz),
-                    enc_x: Some(enc_x),
-                    enc_yz: Some(enc_yz),
-                    target_enc_x: Some(target_enc_x),
-                    target_enc_yz: Some(target_enc_yz),
-                };
-
-                let cs = ConstraintSystem::<Fr>::new_ref();
-                circuit.generate_constraints(cs.clone())?;
-                if !cs.is_satisfied()? {
-                    return Err(SynthesisError::Unsatisfiable);
-                }
-                Ok(cs.num_constraints())
-            })
-            .map_err(|_| SynthesisError::AssignmentMissing)?;
-
-        handle
-            .join()
-            .map_err(|_| SynthesisError::AssignmentMissing)?
-    }
-
+    
     #[test]
-    fn test_meow_constraint_count_from_env() -> Result<(), SynthesisError> {
-        let params =
-            read_bench_env_params(".env").map_err(|_| SynthesisError::AssignmentMissing)?;
-        let log_k = params.log_k;
-        let l = params.l;
-        let rho = params.rho;
+    fn test_meow_circuit_is_satisfied() {
+        let k = 8usize;
+        let n = 16usize;
+        let l = 8usize;
 
-        let k = 1usize << log_k;
-        let n = ((k as f64) / rho).round() as usize;
-        if n == 0 || l > n {
-            return Err(SynthesisError::AssignmentMissing);
+        let poseidon_cfg = poseidon_sponge_config_bn254();
+        let roots = [
+            Fr::from(11u64),
+            Fr::from(22u64),
+            Fr::from(33u64),
+            Fr::from(44u64),
+            Fr::from(55u64),
+        ];
+        let cm_abc = poseidon_hash_elements_bn254(&poseidon_cfg, &roots[0..3]);
+        let cm_xyz = poseidon_hash_elements_bn254(&poseidon_cfg, &roots[3..5]);
+
+        let challenge_r = Fr::from(0u64);
+
+        let rs = ReedSolomonCode::<Fr>::new(k, n);
+        let mut vec_x = vec![Fr::from(0u64); k];
+        vec_x[0] = Fr::from(1u64);
+        let mut vec_yz = vec![Fr::from(0u64); k];
+        vec_yz[0] = Fr::from(7u64);
+        let enc_x = rs.encode(&vec_x).expect("rs encode(x) should succeed");
+        let enc_yz = rs.encode(&vec_yz).expect("rs encode(yz) should succeed");
+
+        let indices_usize = (0..l).collect::<Vec<_>>();
+        let indices = indices_usize
+            .iter()
+            .map(|&i| Fr::from(i as u64))
+            .collect::<Vec<_>>();
+        let target_enc_x = indices_usize.iter().map(|&i| enc_x[i]).collect::<Vec<_>>();
+        let target_enc_yz = indices_usize.iter().map(|&i| enc_yz[i]).collect::<Vec<_>>();
+
+        let mut cols_enc_a = vec![vec![Fr::from(0u64); k]; l];
+        let mut cols_enc_b = vec![vec![Fr::from(0u64); k]; l];
+        let mut cols_enc_c = vec![vec![Fr::from(0u64); k]; l];
+        for i in 0..l {
+            cols_enc_a[i][0] = target_enc_x[i];
+            cols_enc_b[i][0] = target_enc_yz[i];
+            cols_enc_c[i][0] = target_enc_yz[i];
         }
 
-        let num_constraints = count_constraints(k, n, l)?;
-        assert!(num_constraints > 0);
-        eprintln!(
-            "meow constraints (from .env): K={}, N={}, L={} => {}",
-            k, n, l, num_constraints
+        let circuit = Meow::<Fr> {
+            k,
+            n,
+            roots: Some(roots),
+            cm_abc: Some(cm_abc),
+            cm_xyz: Some(cm_xyz),
+            challenge_r: Some(challenge_r),
+            indices: Some(indices),
+            lookup_index_challenge: Some(Fr::from(1u64)),
+            lookup_logup_challenge: Some(Fr::from((n as u64) + 1000)),
+            rs_point_x: Some(Fr::from((n as u64) + 2001)),
+            rs_point_yz: Some(Fr::from((n as u64) + 3001)),
+            poseidon_config: Some(poseidon_cfg),
+            cols_enc_a: Some(cols_enc_a),
+            cols_enc_b: Some(cols_enc_b),
+            cols_enc_c: Some(cols_enc_c),
+            vec_x: Some(vec_x),
+            vec_yz: Some(vec_yz),
+            enc_x: Some(enc_x),
+            enc_yz: Some(enc_yz),
+            target_enc_x: Some(target_enc_x),
+            target_enc_yz: Some(target_enc_yz),
+        };
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        circuit
+            .generate_constraints(cs.clone())
+            .expect("constraint generation should succeed");
+        assert!(
+            cs.is_satisfied().expect("satisfiability check should run"),
+            "meow circuit must be satisfied with valid witness"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn test_meow_constraint_count_range_from_env() -> Result<(), SynthesisError> {
-        let params =
-            read_bench_env_params(".env").map_err(|_| SynthesisError::AssignmentMissing)?;
-        let log_k_min = params.log_k_min;
-        let log_k_max = params.log_k_max;
-        let l = params.l;
-        let rho = params.rho;
-
-        let csv_path = Path::new("benchmark").join("meow_constraints.csv");
-        for log_k in log_k_min..=log_k_max {
-            let k = 1usize << log_k;
-            let n = ((k as f64) / rho).round() as usize;
-            if n == 0 || l > n {
-                return Err(SynthesisError::AssignmentMissing);
-            }
-            let constraints = count_constraints(k, n, l)?;
-
-            let row = [
-                log_k.to_string(),
-                k.to_string(),
-                n.to_string(),
-                l.to_string(),
-                constraints.to_string(),
-            ];
-            append_csv_row(&csv_path, &["log_k", "k", "n", "l", "constraints"], &row)
-                .map_err(|_| SynthesisError::AssignmentMissing)?;
-
-            eprintln!(
-                "meow constraints (range/.env): LOG_K={}, K={}, N={}, L={} => {}",
-                log_k, k, n, l, constraints
-            );
-        }
-        eprintln!("wrote benchmark csv: {}", csv_path.display());
-        Ok(())
     }
 }
