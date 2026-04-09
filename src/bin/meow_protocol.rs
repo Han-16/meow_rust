@@ -9,7 +9,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisMode
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
 use ark_std::Zero;
-use meow_rust::circuits::meow::Meow;
+use meow_rust::circuits::meow::{Meow, MeowPublic, MeowWitness};
 use meow_rust::protocol::prover::{ProveTimeBreakdown, Prover};
 use meow_rust::protocol::verifier::{Verifier, VerifyTimeBreakdown};
 use meow_rust::protocol::{MerkleOpening, ProtocolParams, ProtocolProof};
@@ -414,25 +414,29 @@ fn count_meow_constraints(
     let circuit = Meow::<Fr> {
         k: params.k,
         n: params.n,
-        roots: Some([Fr::zero(); 5]),
-        cm_abc: Some(Fr::zero()),
-        cm_xyz: Some(Fr::zero()),
-        challenge_r: Some(Fr::zero()),
-        indices: Some(zeros_l),
-        lookup_index_challenge: Some(Fr::zero()),
-        lookup_logup_challenge: Some(Fr::zero()),
-        rs_point_x: Some(Fr::zero()),
-        rs_point_yz: Some(Fr::zero()),
-        poseidon_config: Some(poseidon_config),
-        cols_enc_a: Some(zero_cols_lk.clone()),
-        cols_enc_b: Some(zero_cols_lk.clone()),
-        cols_enc_c: Some(zero_cols_lk),
-        vec_x: Some(zeros_k.clone()),
-        vec_yz: Some(zeros_k),
-        enc_x: Some(zeros_n.clone()),
-        enc_yz: Some(zeros_n),
-        target_enc_x: Some(vec![Fr::zero(); params.l]),
-        target_enc_yz: Some(vec![Fr::zero(); params.l]),
+        public: MeowPublic {
+            roots: Some([Fr::zero(); 5]),
+            cm_abc: Some(Fr::zero()),
+            cm_xyz: Some(Fr::zero()),
+            challenge_r: Some(Fr::zero()),
+            indices: Some(zeros_l),
+            lookup_index_challenge: Some(Fr::zero()),
+            lookup_logup_challenge: Some(Fr::zero()),
+            rs_point_x: Some(Fr::zero()),
+            rs_point_yz: Some(Fr::zero()),
+            poseidon_config: Some(poseidon_config),
+        },
+        witness: MeowWitness {
+            cols_enc_a: Some(zero_cols_lk.clone()),
+            cols_enc_b: Some(zero_cols_lk.clone()),
+            cols_enc_c: Some(zero_cols_lk),
+            vec_x: Some(zeros_k.clone()),
+            vec_yz: Some(zeros_k),
+            enc_x: Some(zeros_n.clone()),
+            enc_yz: Some(zeros_n),
+            target_enc_x: Some(vec![Fr::zero(); params.l]),
+            target_enc_yz: Some(vec![Fr::zero(); params.l]),
+        },
     };
 
     let cs = ConstraintSystem::<Fr>::new_ref();

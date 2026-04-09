@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 use crate::circuits::gadgets::linear_code::{reed_solomon::ReedSolomonCode, LinearCode};
-use crate::circuits::meow::Meow;
+use crate::circuits::meow::{Meow, MeowPublic, MeowWitness};
 use crate::crypto::hash::{
     generate_unique_indices, poseidon_hash_elements_bn254, poseidon_sponge_config_bn254,
 };
@@ -16,7 +16,8 @@ use crate::crypto::merkle::{build_merkle_tree_from_group_elements, get_merkle_pr
 use crate::crypto::pedersen::{batch_pedersen_commit_blinded, setup_commit_key, CommitKey};
 use crate::protocol::{
     derive_challenge_r, derive_fiat_shamir_challenges, derive_query_index_seed, MerkleOpening,
-    ProtocolError, ProtocolParams, ProtocolProof, PublicTranscript, QueryOpeningSet, SetupArtifacts,
+    ProtocolError, ProtocolParams, ProtocolProof, PublicTranscript, QueryOpeningSet,
+    SetupArtifacts,
 };
 
 #[derive(Debug, Clone)]
@@ -247,25 +248,29 @@ impl Prover {
         let meow_assignment = Meow::<Fr> {
             k: params.k,
             n: params.n,
-            roots: Some([root_a, root_b, root_c, root_x, root_y]),
-            cm_abc: Some(cm_abc),
-            cm_xyz: Some(cm_xy),
-            challenge_r: Some(r_scalar),
-            indices: Some(indices.iter().map(|&i| Fr::from(i as u64)).collect()),
-            lookup_index_challenge: Some(lookup_index_challenge),
-            lookup_logup_challenge: Some(lookup_logup_challenge),
-            rs_point_x: Some(rs_point_x),
-            rs_point_yz: Some(rs_point_y),
-            poseidon_config: Some(self.poseidon_config.clone()),
-            cols_enc_a: Some(queried_cols_a),
-            cols_enc_b: Some(queried_cols_b),
-            cols_enc_c: Some(queried_cols_c),
-            vec_x: Some(vec_x.clone()),
-            vec_yz: Some(vec_y.clone()),
-            enc_x: Some(enc_x.clone()),
-            enc_yz: Some(enc_y.clone()),
-            target_enc_x: Some(target_enc_x),
-            target_enc_yz: Some(target_enc_y),
+            public: MeowPublic {
+                roots: Some([root_a, root_b, root_c, root_x, root_y]),
+                cm_abc: Some(cm_abc),
+                cm_xyz: Some(cm_xy),
+                challenge_r: Some(r_scalar),
+                indices: Some(indices.iter().map(|&i| Fr::from(i as u64)).collect()),
+                lookup_index_challenge: Some(lookup_index_challenge),
+                lookup_logup_challenge: Some(lookup_logup_challenge),
+                rs_point_x: Some(rs_point_x),
+                rs_point_yz: Some(rs_point_y),
+                poseidon_config: Some(self.poseidon_config.clone()),
+            },
+            witness: MeowWitness {
+                cols_enc_a: Some(queried_cols_a),
+                cols_enc_b: Some(queried_cols_b),
+                cols_enc_c: Some(queried_cols_c),
+                vec_x: Some(vec_x.clone()),
+                vec_yz: Some(vec_y.clone()),
+                enc_x: Some(enc_x.clone()),
+                enc_yz: Some(enc_y.clone()),
+                target_enc_x: Some(target_enc_x),
+                target_enc_yz: Some(target_enc_y),
+            },
         };
 
         let groth16_start = Instant::now();
@@ -325,25 +330,29 @@ fn empty_circuit(params: &ProtocolParams, poseidon_config: PoseidonConfig<Fr>) -
     Meow::<Fr> {
         k: params.k,
         n: params.n,
-        roots: Some([Fr::zero(); 5]),
-        cm_abc: Some(Fr::zero()),
-        cm_xyz: Some(Fr::zero()),
-        challenge_r: Some(Fr::zero()),
-        indices: Some(zeros_l),
-        lookup_index_challenge: Some(Fr::zero()),
-        lookup_logup_challenge: Some(Fr::zero()),
-        rs_point_x: Some(Fr::zero()),
-        rs_point_yz: Some(Fr::zero()),
-        poseidon_config: Some(poseidon_config),
-        cols_enc_a: Some(zero_cols_lk.clone()),
-        cols_enc_b: Some(zero_cols_lk.clone()),
-        cols_enc_c: Some(zero_cols_lk),
-        vec_x: Some(zeros_k.clone()),
-        vec_yz: Some(zeros_k),
-        enc_x: Some(zeros_n.clone()),
-        enc_yz: Some(zeros_n),
-        target_enc_x: Some(vec![Fr::zero(); params.l]),
-        target_enc_yz: Some(vec![Fr::zero(); params.l]),
+        public: MeowPublic {
+            roots: Some([Fr::zero(); 5]),
+            cm_abc: Some(Fr::zero()),
+            cm_xyz: Some(Fr::zero()),
+            challenge_r: Some(Fr::zero()),
+            indices: Some(zeros_l),
+            lookup_index_challenge: Some(Fr::zero()),
+            lookup_logup_challenge: Some(Fr::zero()),
+            rs_point_x: Some(Fr::zero()),
+            rs_point_yz: Some(Fr::zero()),
+            poseidon_config: Some(poseidon_config),
+        },
+        witness: MeowWitness {
+            cols_enc_a: Some(zero_cols_lk.clone()),
+            cols_enc_b: Some(zero_cols_lk.clone()),
+            cols_enc_c: Some(zero_cols_lk),
+            vec_x: Some(zeros_k.clone()),
+            vec_yz: Some(zeros_k),
+            enc_x: Some(zeros_n.clone()),
+            enc_yz: Some(zeros_n),
+            target_enc_x: Some(vec![Fr::zero(); params.l]),
+            target_enc_yz: Some(vec![Fr::zero(); params.l]),
+        },
     }
 }
 
@@ -486,11 +495,7 @@ mod tests {
     #[ignore = "Groth16 setup mode may fail with inverse-heavy gadgets"]
     fn test_protocol_end_to_end_without_cplink() {
         let mut rng = StdRng::seed_from_u64(42);
-        let params = ProtocolParams {
-            k: 4,
-            n: 8,
-            l: 3,
-        };
+        let params = ProtocolParams { k: 4, n: 8, l: 3 };
 
         let prover = Prover::setup(params.k, &mut rng);
         let setup = prover.circuit_setup(&params, &mut rng).unwrap();

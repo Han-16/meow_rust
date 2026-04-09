@@ -17,33 +17,54 @@ use crate::circuits::gadgets::{
 };
 
 #[derive(Debug, Clone)]
-pub struct Meow<F: PrimeField> {
-    // Dimensions.
-    pub k: usize,
-    pub n: usize,
-
-    // Public inputs.
-    pub roots: Option<[F; 5]>, // [A, B, C, X, YZ] merkle roots
+pub struct MeowPublic<F: PrimeField> {
+    // Public inputs carried by the Groth16 proof.
+    // Merkle roots for the committed encodings [A, B, C, X, Y].
+    pub roots: Option<[F; 5]>,
+    // Poseidon commitment over roots[A, B, C].
     pub cm_abc: Option<F>,
+    // Poseidon commitment over roots[X, Y].
     pub cm_xyz: Option<F>,
-    pub challenge_r: Option<F>,      // scalar r
-    pub indices: Option<Vec<F>>,     // len = L
+    // Scalar challenge r from which [1, r, r^2, ...] is rebuilt in-circuit.
+    pub challenge_r: Option<F>,
+    // Queried RS positions as field elements, length L.
+    pub indices: Option<Vec<F>>,
+    // Row-compression challenge for lookup rows such as [index, value].
     pub lookup_index_challenge: Option<F>,
+    // LogUp challenge used in the rational lookup identity.
     pub lookup_logup_challenge: Option<F>,
+    // Out-of-domain evaluation point for the RS check on x.
     pub rs_point_x: Option<F>,
+    // Out-of-domain evaluation point for the RS check on yz.
     pub rs_point_yz: Option<F>,
     pub poseidon_config: Option<PoseidonConfig<F>>,
+}
 
-    // Witnesses.
-    pub cols_enc_a: Option<Vec<Vec<F>>>, // [L][K]
-    pub cols_enc_b: Option<Vec<Vec<F>>>, // [L][K]
-    pub cols_enc_c: Option<Vec<Vec<F>>>, // [L][K]
-    pub vec_x: Option<Vec<F>>,           // [K]
-    pub vec_yz: Option<Vec<F>>,          // [K]
-    pub enc_x: Option<Vec<F>>,           // [N]
-    pub enc_yz: Option<Vec<F>>,          // [N]
-    pub target_enc_x: Option<Vec<F>>,    // [L]
-    pub target_enc_yz: Option<Vec<F>>,   // [L]
+#[derive(Debug, Clone)]
+pub struct MeowWitness<F: PrimeField> {
+    // Witnesses used to satisfy the queried checks.
+    // Queried encoded columns from A, B, C at the selected indices, each [L][K].
+    pub cols_enc_a: Option<Vec<Vec<F>>>,
+    pub cols_enc_b: Option<Vec<Vec<F>>>,
+    pub cols_enc_c: Option<Vec<Vec<F>>>,
+    // Folded vectors x = rA and yz, each length K.
+    pub vec_x: Option<Vec<F>>,
+    pub vec_yz: Option<Vec<F>>,
+    // Full RS encodings of x and yz, each length N.
+    pub enc_x: Option<Vec<F>>,
+    pub enc_yz: Option<Vec<F>>,
+    // Claimed values of enc_x / enc_yz at the queried indices, each length L.
+    pub target_enc_x: Option<Vec<F>>,
+    pub target_enc_yz: Option<Vec<F>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Meow<F: PrimeField> {
+    // Circuit dimensions: original matrix width k and RS codeword length n.
+    pub k: usize,
+    pub n: usize,
+    pub public: MeowPublic<F>,
+    pub witness: MeowWitness<F>,
 }
 
 fn fold<F: PrimeField>(lhs: &[FpVar<F>], rhs: &[FpVar<F>]) -> Result<FpVar<F>, SynthesisError> {
@@ -71,31 +92,37 @@ fn poseidon_hash<F: PrimeField + Absorb>(
 
 impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> R1CSResult<()> {
-        let Self {
+        let Meow {
             k,
             n,
-            roots,
-            cm_abc,
-            cm_xyz,
-            challenge_r,
-            indices,
-            lookup_index_challenge,
-            lookup_logup_challenge,
-            rs_point_x,
-            rs_point_yz,
-            poseidon_config,
-            cols_enc_a,
-            cols_enc_b,
-            cols_enc_c,
-            vec_x,
-            vec_yz,
-            enc_x,
-            enc_yz,
-            target_enc_x,
-            target_enc_yz,
+            public:
+                MeowPublic {
+                    roots,
+                    cm_abc,
+                    cm_xyz,
+                    challenge_r,
+                    indices,
+                    lookup_index_challenge,
+                    lookup_logup_challenge,
+                    rs_point_x,
+                    rs_point_yz,
+                    poseidon_config,
+                },
+            witness:
+                MeowWitness {
+                    cols_enc_a,
+                    cols_enc_b,
+                    cols_enc_c,
+                    vec_x,
+                    vec_yz,
+                    enc_x,
+                    enc_yz,
+                    target_enc_x,
+                    target_enc_yz,
+                },
         } = self;
 
-        // Public inputs.
+        // Public transcript values exposed to the verifier.
         let roots = Vec::<FpVar<F>>::new_input(cs.clone(), || {
             roots
                 .map(|arr| arr.to_vec())
@@ -129,7 +156,7 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
             rs_point_yz.ok_or(SynthesisError::AssignmentMissing)
         })?;
 
-        // Witnesses.
+        // Witness values used to open the queried positions and folded checks.
         let cols_enc_a_vals = cols_enc_a.ok_or(SynthesisError::AssignmentMissing)?;
         let cols_enc_b_vals = cols_enc_b.ok_or(SynthesisError::AssignmentMissing)?;
         let cols_enc_c_vals = cols_enc_c.ok_or(SynthesisError::AssignmentMissing)?;
@@ -174,7 +201,7 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
             cur *= &challenge_r;
         }
 
-        // 1) Lookup constraints (t.Lookup(indices[i]) == target[i]) for X and YZ.
+        // 1) Bind queried indices to the claimed encoded values.
         enforce_lookup_vector_indexing(
             cs.clone(),
             &enc_x,
@@ -192,7 +219,7 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
             &lookup_logup_challenge,
         )?;
 
-        // 1-b) Fold checks.
+        // 1-b) Check that queried columns fold to the looked-up targets.
         for i in 0..l {
             let fold_a = fold(&challenge_r_pows, &cols_enc_a[i])?;
             let fold_b = fold(&vec_x, &cols_enc_b[i])?;
@@ -203,14 +230,14 @@ impl<F: PrimeField + Absorb> ConstraintSynthesizer<F> for Meow<F> {
             fold_c.enforce_equal(&target_enc_yz[i])?;
         }
 
-        // 2) Poseidon checks: CmABC = H(RootA,RootB,RootC), CmXYZ = H(RootX,RootYZ)
+        // 2) Recompute public hash commitments from the supplied roots.
         let poseidon_cfg = poseidon_config.ok_or(SynthesisError::AssignmentMissing)?;
         let calc_cm_abc = poseidon_hash(cs.clone(), &poseidon_cfg, &roots[0..3])?;
         calc_cm_abc.enforce_equal(&cm_abc)?;
         let calc_cm_xyz = poseidon_hash(cs.clone(), &poseidon_cfg, &roots[3..5])?;
         calc_cm_xyz.enforce_equal(&cm_xyz)?;
 
-        // 3) Reed-Solomon encoding checks (same as VerifyRSEncoding probabilistic test).
+        // 3) Probabilistically check that x and yz match their RS encodings.
         let rs_code = ReedSolomonCode::<F>::new(k, n);
         let rs_gadget = ReedSolomonGadget::<F, FpVar<F>>::new_constant(cs, rs_code)?;
         rs_gadget.is_valid(&vec_x, &enc_x, &rs_point_x)?;
@@ -228,7 +255,7 @@ mod tests {
 
     use crate::circuits::gadgets::linear_code::{reed_solomon::ReedSolomonCode, LinearCode};
     use crate::crypto::hash::{poseidon_hash_elements_bn254, poseidon_sponge_config_bn254};
-    
+
     #[test]
     fn test_meow_circuit_is_satisfied() {
         let k = 8usize;
@@ -276,25 +303,29 @@ mod tests {
         let circuit = Meow::<Fr> {
             k,
             n,
-            roots: Some(roots),
-            cm_abc: Some(cm_abc),
-            cm_xyz: Some(cm_xyz),
-            challenge_r: Some(challenge_r),
-            indices: Some(indices),
-            lookup_index_challenge: Some(Fr::from(1u64)),
-            lookup_logup_challenge: Some(Fr::from((n as u64) + 1000)),
-            rs_point_x: Some(Fr::from((n as u64) + 2001)),
-            rs_point_yz: Some(Fr::from((n as u64) + 3001)),
-            poseidon_config: Some(poseidon_cfg),
-            cols_enc_a: Some(cols_enc_a),
-            cols_enc_b: Some(cols_enc_b),
-            cols_enc_c: Some(cols_enc_c),
-            vec_x: Some(vec_x),
-            vec_yz: Some(vec_yz),
-            enc_x: Some(enc_x),
-            enc_yz: Some(enc_yz),
-            target_enc_x: Some(target_enc_x),
-            target_enc_yz: Some(target_enc_yz),
+            public: MeowPublic {
+                roots: Some(roots),
+                cm_abc: Some(cm_abc),
+                cm_xyz: Some(cm_xyz),
+                challenge_r: Some(challenge_r),
+                indices: Some(indices),
+                lookup_index_challenge: Some(Fr::from(1u64)),
+                lookup_logup_challenge: Some(Fr::from((n as u64) + 1000)),
+                rs_point_x: Some(Fr::from((n as u64) + 2001)),
+                rs_point_yz: Some(Fr::from((n as u64) + 3001)),
+                poseidon_config: Some(poseidon_cfg),
+            },
+            witness: MeowWitness {
+                cols_enc_a: Some(cols_enc_a),
+                cols_enc_b: Some(cols_enc_b),
+                cols_enc_c: Some(cols_enc_c),
+                vec_x: Some(vec_x),
+                vec_yz: Some(vec_yz),
+                enc_x: Some(enc_x),
+                enc_yz: Some(enc_yz),
+                target_enc_x: Some(target_enc_x),
+                target_enc_yz: Some(target_enc_yz),
+            },
         };
 
         let cs = ConstraintSystem::<Fr>::new_ref();
