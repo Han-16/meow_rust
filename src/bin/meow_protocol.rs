@@ -87,10 +87,6 @@ fn load_configs() -> Vec<MeowBenchConfig> {
             k,
             n,
             l,
-            lookup_index_challenge: Fr::from(17u64),
-            lookup_logup_challenge: Fr::from((n as u64) + 1009),
-            rs_point_x: Fr::from((n as u64) + 2003),
-            rs_point_y: Fr::from((n as u64) + 3001),
         };
 
         out.push(MeowBenchConfig {
@@ -423,10 +419,10 @@ fn count_meow_constraints(
         cm_xyz: Some(Fr::zero()),
         challenge_r: Some(Fr::zero()),
         indices: Some(zeros_l),
-        lookup_index_challenge: Some(params.lookup_index_challenge),
-        lookup_logup_challenge: Some(params.lookup_logup_challenge),
-        rs_point_x: Some(params.rs_point_x),
-        rs_point_yz: Some(params.rs_point_y),
+        lookup_index_challenge: Some(Fr::zero()),
+        lookup_logup_challenge: Some(Fr::zero()),
+        rs_point_x: Some(Fr::zero()),
+        rs_point_yz: Some(Fr::zero()),
         poseidon_config: Some(poseidon_config),
         cols_enc_a: Some(zero_cols_lk.clone()),
         cols_enc_b: Some(zero_cols_lk.clone()),
