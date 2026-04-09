@@ -59,7 +59,7 @@ pub trait LinearCode: Clone + Copy + Send + Sync {
     fn generator_matrix(&self) -> Vec<Vec<Self::Alphabet>> {
         cfg_into_iter!(0..self.message_length())
             .map(|i| {
-                let mut msg = vec![Self::Alphabet::zero(); self.codeword_length()];
+                let mut msg = vec![Self::Alphabet::zero(); self.message_length()];
                 msg[i] = Self::Alphabet::one();
                 self.encode(&msg).unwrap()
             })
