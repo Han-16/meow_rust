@@ -1,5 +1,4 @@
-use ark_bn254::{Bn254, Fr};
-use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;
+use ark_bn254::Bn254;
 use ark_groth16::{Groth16, VerifyingKey};
 use ark_snark::SNARK;
 use std::time::{Duration, Instant};
@@ -9,7 +8,7 @@ use crate::crypto::merkle::verify_membership;
 use crate::protocol::prover::build_public_inputs;
 use crate::protocol::{
     derive_challenge_r, derive_fiat_shamir_challenges, derive_query_index_seed, ProtocolError,
-    ProtocolParams, ProtocolProof,
+    ProtocolContext, ProtocolParams, ProtocolProof,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -28,19 +27,15 @@ impl VerifyTimeBreakdown {
 pub struct Verifier {
     params: ProtocolParams,
     vk: VerifyingKey<Bn254>,
-    poseidon_config: PoseidonConfig<Fr>,
+    pub context: ProtocolContext,
 }
 
 impl Verifier {
-    pub fn new(
-        params: ProtocolParams,
-        vk: VerifyingKey<Bn254>,
-        poseidon_config: PoseidonConfig<Fr>,
-    ) -> Self {
+    pub fn new(params: ProtocolParams, vk: VerifyingKey<Bn254>, context: ProtocolContext) -> Self {
         Self {
             params,
             vk,
-            poseidon_config,
+            context,
         }
     }
 
@@ -98,7 +93,7 @@ impl Verifier {
 
         // Circuit hash publics are Poseidon in current meow.rs.
         let expected_cm_abc = poseidon_hash_elements_bn254(
-            &self.poseidon_config,
+            &self.context.poseidon_config,
             &[
                 proof.public.root_a,
                 proof.public.root_b,
@@ -109,7 +104,7 @@ impl Verifier {
             return Ok((false, timings));
         }
         let expected_cm_xy = poseidon_hash_elements_bn254(
-            &self.poseidon_config,
+            &self.context.poseidon_config,
             &[proof.public.root_x, proof.public.root_y],
         );
         if expected_cm_xy != proof.public.cm_xy {

@@ -1,5 +1,4 @@
 use ark_bn254::{Bn254, Fr};
-use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;
 use ark_ff::{One, UniformRand, Zero};
 use ark_groth16::{Groth16, ProvingKey};
 use ark_snark::SNARK;
@@ -9,22 +8,18 @@ use std::time::{Duration, Instant};
 
 use crate::circuits::gadgets::linear_code::{reed_solomon::ReedSolomonCode, LinearCode};
 use crate::circuits::meow::{Meow, MeowPublic, MeowWitness};
-use crate::crypto::hash::{
-    generate_unique_indices, poseidon_hash_elements_bn254, poseidon_sponge_config_bn254,
-};
+use crate::crypto::hash::{generate_unique_indices, poseidon_hash_elements_bn254};
 use crate::crypto::merkle::{build_merkle_tree_from_group_elements, get_merkle_proof};
-use crate::crypto::pedersen::{batch_pedersen_commit_blinded, setup_commit_key, CommitKey};
+use crate::crypto::pedersen::{batch_pedersen_commit_blinded, CommitKey};
 use crate::protocol::{
     derive_challenge_r, derive_fiat_shamir_challenges, derive_query_index_seed, MerkleOpening,
-    ProtocolError, ProtocolParams, ProtocolProof, PublicTranscript, QueryOpeningSet,
-    SetupArtifacts,
+    ProtocolContext, ProtocolError, ProtocolParams, ProtocolProof, PublicTranscript,
+    QueryOpeningSet,
 };
 
 #[derive(Debug, Clone)]
 pub struct Prover {
-    pub ck1: CommitKey,
-    pub ck_scalar: CommitKey,
-    pub poseidon_config: PoseidonConfig<Fr>,
+    pub context: ProtocolContext,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -42,23 +37,8 @@ impl ProveTimeBreakdown {
 }
 
 impl Prover {
-    pub fn setup<R: Rng>(k: usize, rng: &mut R) -> Self {
-        Self {
-            ck1: setup_commit_key(k, rng),
-            ck_scalar: setup_commit_key(1, rng),
-            poseidon_config: poseidon_sponge_config_bn254(),
-        }
-    }
-
-    pub fn circuit_setup<R: Rng + CryptoRng>(
-        &self,
-        params: &ProtocolParams,
-        rng: &mut R,
-    ) -> Result<SetupArtifacts, ProtocolError> {
-        validate_params(params)?;
-        let circuit = empty_circuit(params, self.poseidon_config.clone());
-        let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(circuit, rng)?;
-        Ok(SetupArtifacts { pk, vk })
+    pub fn new(context: ProtocolContext) -> Self {
+        Self { context }
     }
 
     pub fn prove_with_random_matrices<R: Rng + CryptoRng>(
@@ -131,11 +111,11 @@ impl Prover {
         // 2-3) Commit columns with ck1 and build Merkle roots.
         let depth = ilog2_exact(params.n)?;
         let (tree_a, root_a, leaves_a, _) =
-            commit_matrix_with_timing(&cols_enc_a, &self.ck1, depth, rng, timings)?;
+            commit_matrix_with_timing(&cols_enc_a, &self.context.ck1, depth, rng, timings)?;
         let (tree_b, root_b, leaves_b, _) =
-            commit_matrix_with_timing(&cols_enc_b, &self.ck1, depth, rng, timings)?;
+            commit_matrix_with_timing(&cols_enc_b, &self.context.ck1, depth, rng, timings)?;
         let (tree_c, root_c, leaves_c, _) =
-            commit_matrix_with_timing(&cols_enc_c, &self.ck1, depth, rng, timings)?;
+            commit_matrix_with_timing(&cols_enc_c, &self.context.ck1, depth, rng, timings)?;
 
         // 4-5) Verifier challenge: Keccak(rootA,rootB,rootC) -> scalar r -> [1,r,r^2,...].
         let r_scalar = derive_challenge_r(root_a, root_b, root_c);
@@ -161,19 +141,20 @@ impl Prover {
         let z_columns = to_scalar_columns(&enc_z);
 
         let (tree_x, root_x, leaves_x, _) =
-            commit_matrix_with_timing(&x_columns, &self.ck_scalar, depth, rng, timings)?;
+            commit_matrix_with_timing(&x_columns, &self.context.ck_scalar, depth, rng, timings)?;
         let (tree_y, root_y, leaves_y, _) =
-            commit_matrix_with_timing(&y_columns, &self.ck_scalar, depth, rng, timings)?;
+            commit_matrix_with_timing(&y_columns, &self.context.ck_scalar, depth, rng, timings)?;
         let (tree_z, root_z, leaves_z, _) =
-            commit_matrix_with_timing(&z_columns, &self.ck_scalar, depth, rng, timings)?;
+            commit_matrix_with_timing(&z_columns, &self.context.ck_scalar, depth, rng, timings)?;
 
         // 8) Query indices from Keccak(rootX,rootY,rootZ).
         let idx_seed = derive_query_index_seed(root_x, root_y, root_z);
         let indices = generate_unique_indices(idx_seed, params.n, params.l)?;
 
         // Circuit public hashes use Poseidon gadget in current meow.rs.
-        let cm_abc = poseidon_hash_elements_bn254(&self.poseidon_config, &[root_a, root_b, root_c]);
-        let cm_xy = poseidon_hash_elements_bn254(&self.poseidon_config, &[root_x, root_y]);
+        let cm_abc =
+            poseidon_hash_elements_bn254(&self.context.poseidon_config, &[root_a, root_b, root_c]);
+        let cm_xy = poseidon_hash_elements_bn254(&self.context.poseidon_config, &[root_x, root_y]);
 
         // 9) Merkle openings for queried indices.
         let mut openings = Vec::with_capacity(params.l);
@@ -258,7 +239,7 @@ impl Prover {
                 lookup_logup_challenge: Some(lookup_logup_challenge),
                 rs_point_x: Some(rs_point_x),
                 rs_point_yz: Some(rs_point_y),
-                poseidon_config: Some(self.poseidon_config.clone()),
+                poseidon_config: Some(self.context.poseidon_config.clone()),
             },
             witness: MeowWitness {
                 cols_enc_a: Some(queried_cols_a),
@@ -320,40 +301,6 @@ pub(crate) fn build_public_inputs(public: &PublicTranscript) -> Vec<Fr> {
     out.push(public.rs_point_x);
     out.push(public.rs_point_y);
     out
-}
-
-fn empty_circuit(params: &ProtocolParams, poseidon_config: PoseidonConfig<Fr>) -> Meow<Fr> {
-    let zeros_k = vec![Fr::zero(); params.k];
-    let zeros_n = vec![Fr::zero(); params.n];
-    let zeros_l = vec![Fr::zero(); params.l];
-    let zero_cols_lk = vec![vec![Fr::zero(); params.k]; params.l];
-    Meow::<Fr> {
-        k: params.k,
-        n: params.n,
-        public: MeowPublic {
-            roots: Some([Fr::zero(); 5]),
-            cm_abc: Some(Fr::zero()),
-            cm_xyz: Some(Fr::zero()),
-            challenge_r: Some(Fr::zero()),
-            indices: Some(zeros_l),
-            lookup_index_challenge: Some(Fr::zero()),
-            lookup_logup_challenge: Some(Fr::zero()),
-            rs_point_x: Some(Fr::zero()),
-            rs_point_yz: Some(Fr::zero()),
-            poseidon_config: Some(poseidon_config),
-        },
-        witness: MeowWitness {
-            cols_enc_a: Some(zero_cols_lk.clone()),
-            cols_enc_b: Some(zero_cols_lk.clone()),
-            cols_enc_c: Some(zero_cols_lk),
-            vec_x: Some(zeros_k.clone()),
-            vec_yz: Some(zeros_k),
-            enc_x: Some(zeros_n.clone()),
-            enc_yz: Some(zeros_n),
-            target_enc_x: Some(vec![Fr::zero(); params.l]),
-            target_enc_yz: Some(vec![Fr::zero(); params.l]),
-        },
-    }
 }
 
 fn validate_params(params: &ProtocolParams) -> Result<(), ProtocolError> {
@@ -497,13 +444,14 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let params = ProtocolParams { k: 4, n: 8, l: 3 };
 
-        let prover = Prover::setup(params.k, &mut rng);
-        let setup = prover.circuit_setup(&params, &mut rng).unwrap();
+        let context = ProtocolContext::setup(params.k, &mut rng);
+        let prover = Prover::new(context.clone());
+        let setup = context.circuit_setup(&params, &mut rng).unwrap();
         let proof = prover
             .prove_with_random_matrices(&params, &setup.pk, &mut rng)
             .unwrap();
 
-        let verifier = Verifier::new(params.clone(), setup.vk, prover.poseidon_config.clone());
+        let verifier = Verifier::new(params.clone(), setup.vk, context);
         assert!(verifier.verify(&proof).unwrap());
     }
 }

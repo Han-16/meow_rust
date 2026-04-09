@@ -12,7 +12,7 @@ use ark_std::Zero;
 use meow_rust::circuits::meow::{Meow, MeowPublic, MeowWitness};
 use meow_rust::protocol::prover::{ProveTimeBreakdown, Prover};
 use meow_rust::protocol::verifier::{Verifier, VerifyTimeBreakdown};
-use meow_rust::protocol::{MerkleOpening, ProtocolParams, ProtocolProof};
+use meow_rust::protocol::{MerkleOpening, ProtocolContext, ProtocolParams, ProtocolProof};
 use meow_rust::utils::benchmark_io::append_csv_row;
 use meow_rust::utils::env::read_bench_env_params;
 
@@ -139,11 +139,12 @@ fn run_benchmark(config: &MeowBenchConfig) -> MeowBenchResult {
     let mut rng = StdRng::seed_from_u64(BENCH_SEED.wrapping_add(config.log_k as u64));
     let total_start = Instant::now();
 
-    let prover = Prover::setup(config.params.k, &mut rng);
-    let constraint_count = count_meow_constraints(&config.params, prover.poseidon_config.clone());
+    let context = ProtocolContext::setup(config.params.k, &mut rng);
+    let prover = Prover::new(context.clone());
+    let constraint_count = count_meow_constraints(&config.params, context.poseidon_config.clone());
 
     let setup_start = Instant::now();
-    let setup = prover
+    let setup = context
         .circuit_setup(&config.params, &mut rng)
         .expect("circuit setup failed");
     let setup_time = setup_start.elapsed();
@@ -155,11 +156,7 @@ fn run_benchmark(config: &MeowBenchConfig) -> MeowBenchResult {
     let prove_time = prove_start.elapsed();
 
     let verify_start = Instant::now();
-    let verifier = Verifier::new(
-        config.params.clone(),
-        setup.vk,
-        prover.poseidon_config.clone(),
-    );
+    let verifier = Verifier::new(config.params.clone(), setup.vk, context);
     let (verify_ok, verify_breakdown) = verifier
         .verify_with_timing(&protocol_proof)
         .expect("verify failed");
