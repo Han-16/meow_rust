@@ -10,14 +10,13 @@ use std::time::{Duration, Instant};
 use crate::circuits::gadgets::linear_code::{reed_solomon::ReedSolomonCode, LinearCode};
 use crate::circuits::meow::Meow;
 use crate::crypto::hash::{
-    generate_unique_indices, hash_elements, poseidon_hash_elements_bn254,
-    poseidon_sponge_config_bn254,
+    generate_unique_indices, poseidon_hash_elements_bn254, poseidon_sponge_config_bn254,
 };
 use crate::crypto::merkle::{build_merkle_tree_from_group_elements, get_merkle_proof};
 use crate::crypto::pedersen::{batch_pedersen_commit_blinded, setup_commit_key, CommitKey};
 use crate::protocol::{
-    MerkleOpening, ProtocolError, ProtocolParams, ProtocolProof, PublicTranscript, QueryOpeningSet,
-    SetupArtifacts,
+    derive_challenge_r, derive_fiat_shamir_challenges, derive_query_index_seed, MerkleOpening,
+    ProtocolError, ProtocolParams, ProtocolProof, PublicTranscript, QueryOpeningSet, SetupArtifacts,
 };
 
 #[derive(Debug, Clone)]
@@ -138,7 +137,7 @@ impl Prover {
             commit_matrix_with_timing(&cols_enc_c, &self.ck1, depth, rng, timings)?;
 
         // 4-5) Verifier challenge: Keccak(rootA,rootB,rootC) -> scalar r -> [1,r,r^2,...].
-        let r_scalar = hash_elements(&[root_a, root_b, root_c]);
+        let r_scalar = derive_challenge_r(root_a, root_b, root_c);
         let challenge_r = powers_vector(r_scalar, params.k);
 
         // 6) x = rA, y = xB, z = rC.
@@ -168,7 +167,7 @@ impl Prover {
             commit_matrix_with_timing(&z_columns, &self.ck_scalar, depth, rng, timings)?;
 
         // 8) Query indices from Keccak(rootX,rootY,rootZ).
-        let idx_seed = hash_elements(&[root_x, root_y, root_z]);
+        let idx_seed = derive_query_index_seed(root_x, root_y, root_z);
         let indices = generate_unique_indices(idx_seed, params.n, params.l)?;
 
         // Circuit public hashes use Poseidon gadget in current meow.rs.
@@ -222,6 +221,29 @@ impl Prover {
         timings.merkle_membership_proof += merkle_proof_start.elapsed();
 
         // 10) Build Groth16 witness only from queried columns and global vectors.
+        let mut public = PublicTranscript {
+            root_a,
+            root_b,
+            root_c,
+            root_x,
+            root_y,
+            root_z,
+            cm_abc,
+            cm_xy,
+            challenge_r: r_scalar,
+            indices: indices.clone(),
+            lookup_index_challenge: Fr::zero(),
+            lookup_logup_challenge: Fr::zero(),
+            rs_point_x: Fr::zero(),
+            rs_point_y: Fr::zero(),
+        };
+        let (lookup_index_challenge, lookup_logup_challenge, rs_point_x, rs_point_y) =
+            derive_fiat_shamir_challenges(&public, params.n);
+        public.lookup_index_challenge = lookup_index_challenge;
+        public.lookup_logup_challenge = lookup_logup_challenge;
+        public.rs_point_x = rs_point_x;
+        public.rs_point_y = rs_point_y;
+
         let meow_assignment = Meow::<Fr> {
             k: params.k,
             n: params.n,
@@ -230,10 +252,10 @@ impl Prover {
             cm_xyz: Some(cm_xy),
             challenge_r: Some(r_scalar),
             indices: Some(indices.iter().map(|&i| Fr::from(i as u64)).collect()),
-            lookup_index_challenge: Some(params.lookup_index_challenge),
-            lookup_logup_challenge: Some(params.lookup_logup_challenge),
-            rs_point_x: Some(params.rs_point_x),
-            rs_point_yz: Some(params.rs_point_y),
+            lookup_index_challenge: Some(lookup_index_challenge),
+            lookup_logup_challenge: Some(lookup_logup_challenge),
+            rs_point_x: Some(rs_point_x),
+            rs_point_yz: Some(rs_point_y),
             poseidon_config: Some(self.poseidon_config.clone()),
             cols_enc_a: Some(queried_cols_a),
             cols_enc_b: Some(queried_cols_b),
@@ -249,23 +271,6 @@ impl Prover {
         let groth16_start = Instant::now();
         let groth16_proof = Groth16::<Bn254>::prove(pk, meow_assignment, rng)?;
         timings.groth16_prove += groth16_start.elapsed();
-
-        let public = PublicTranscript {
-            root_a,
-            root_b,
-            root_c,
-            root_x,
-            root_y,
-            root_z,
-            cm_abc,
-            cm_xy,
-            challenge_r: r_scalar,
-            indices: indices.clone(),
-            lookup_index_challenge: params.lookup_index_challenge,
-            lookup_logup_challenge: params.lookup_logup_challenge,
-            rs_point_x: params.rs_point_x,
-            rs_point_y: params.rs_point_y,
-        };
 
         let public_inputs = build_public_inputs(&public);
 
@@ -325,10 +330,10 @@ fn empty_circuit(params: &ProtocolParams, poseidon_config: PoseidonConfig<Fr>) -
         cm_xyz: Some(Fr::zero()),
         challenge_r: Some(Fr::zero()),
         indices: Some(zeros_l),
-        lookup_index_challenge: Some(params.lookup_index_challenge),
-        lookup_logup_challenge: Some(params.lookup_logup_challenge),
-        rs_point_x: Some(params.rs_point_x),
-        rs_point_yz: Some(params.rs_point_y),
+        lookup_index_challenge: Some(Fr::zero()),
+        lookup_logup_challenge: Some(Fr::zero()),
+        rs_point_x: Some(Fr::zero()),
+        rs_point_yz: Some(Fr::zero()),
         poseidon_config: Some(poseidon_config),
         cols_enc_a: Some(zero_cols_lk.clone()),
         cols_enc_b: Some(zero_cols_lk.clone()),
@@ -485,10 +490,6 @@ mod tests {
             k: 4,
             n: 8,
             l: 3,
-            lookup_index_challenge: Fr::from(17u64),
-            lookup_logup_challenge: Fr::from(1009u64),
-            rs_point_x: Fr::from(0u64),
-            rs_point_y: Fr::from(0u64),
         };
 
         let prover = Prover::setup(params.k, &mut rng);
