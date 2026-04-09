@@ -140,7 +140,6 @@ pub fn enforce_lookup_vector_indexing<F: PrimeField>(
     }
 
     // table row: [index, table_value], query row: [query_index, query_value]
-    // row linear combination with coefficients [alpha, 1].
     let table_rows = table_values
         .iter()
         .enumerate()
@@ -151,11 +150,68 @@ pub fn enforce_lookup_vector_indexing<F: PrimeField>(
         .zip(query_values.iter())
         .map(|(i, v)| vec![i.clone(), v.clone()])
         .collect::<Vec<_>>();
-    let row_coeffs = vec![index_challenge.clone(), FpVar::Constant(F::from(1u64))];
 
-    enforce_logup_rows(cs, &table_rows, &query_rows, logup_challenge, &row_coeffs)?;
+    enforce_lookup_rows(cs, &table_rows, &query_rows, index_challenge, logup_challenge)?;
 
     Ok(())
+}
+
+fn validate_row_shapes<F: PrimeField>(
+    table_rows: &[Vec<FpVar<F>>],
+    query_rows: &[Vec<FpVar<F>>],
+) -> Result<usize, SynthesisError> {
+    if table_rows.is_empty() || query_rows.is_empty() {
+        return Err(SynthesisError::AssignmentMissing);
+    }
+    let row_len = table_rows[0].len();
+    if row_len == 0 {
+        return Err(SynthesisError::AssignmentMissing);
+    }
+    if table_rows.iter().any(|r| r.len() != row_len) || query_rows.iter().any(|r| r.len() != row_len)
+    {
+        return Err(SynthesisError::AssignmentMissing);
+    }
+    Ok(row_len)
+}
+
+pub fn build_row_coeffs_from_alpha<F: PrimeField>(
+    alpha: &FpVar<F>,
+    width: usize,
+) -> Vec<FpVar<F>> {
+    let mut coeffs = Vec::with_capacity(width);
+    let mut cur = FpVar::<F>::one();
+    for _ in 0..width {
+        coeffs.push(cur.clone());
+        cur *= alpha;
+    }
+    coeffs
+}
+
+pub fn enforce_lookup_rows_with_coeffs<F: PrimeField>(
+    cs: ConstraintSystemRef<F>,
+    table_rows: &[Vec<FpVar<F>>],
+    query_rows: &[Vec<FpVar<F>>],
+    row_coeffs: &[FpVar<F>],
+    logup_challenge: &FpVar<F>,
+) -> Result<(), SynthesisError> {
+    let row_len = validate_row_shapes(table_rows, query_rows)?;
+    if row_coeffs.len() != row_len {
+        return Err(SynthesisError::AssignmentMissing);
+    }
+
+    enforce_logup_rows(cs, table_rows, query_rows, logup_challenge, row_coeffs)
+}
+
+pub fn enforce_lookup_rows<F: PrimeField>(
+    cs: ConstraintSystemRef<F>,
+    table_rows: &[Vec<FpVar<F>>],
+    query_rows: &[Vec<FpVar<F>>],
+    alpha: &FpVar<F>,
+    logup_challenge: &FpVar<F>,
+) -> Result<(), SynthesisError> {
+    let row_len = validate_row_shapes(table_rows, query_rows)?;
+    let row_coeffs = build_row_coeffs_from_alpha(alpha, row_len);
+    enforce_lookup_rows_with_coeffs(cs, table_rows, query_rows, &row_coeffs, logup_challenge)
 }
 
 fn row_linear_combination<F: PrimeField>(
@@ -333,6 +389,33 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct MultiColumnLookupCircuit {
+        table_rows: Vec<Vec<Fr>>,
+        query_rows: Vec<Vec<Fr>>,
+        alpha: Fr,
+        beta: Fr,
+    }
+
+    impl ConstraintSynthesizer<Fr> for MultiColumnLookupCircuit {
+        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> R1CSResult<()> {
+            let table_vars = self
+                .table_rows
+                .iter()
+                .map(|row| Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(row.clone())))
+                .collect::<Result<Vec<_>, _>>()?;
+            let query_vars = self
+                .query_rows
+                .iter()
+                .map(|row| Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(row.clone())))
+                .collect::<Result<Vec<_>, _>>()?;
+            let alpha_var = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.alpha))?;
+            let beta_var = FpVar::<Fr>::new_input(cs.clone(), || Ok(self.beta))?;
+
+            enforce_lookup_rows(cs, &table_vars, &query_vars, &alpha_var, &beta_var)
+        }
+    }
+
+    #[derive(Clone)]
     struct QueryNotInTableCircuit {
         beta: Fr,
         alpha: Fr,
@@ -357,7 +440,7 @@ mod tests {
 
             let beta = FpVar::new_input(cs.clone(), || Ok(self.beta))?;
             let alpha = FpVar::new_input(cs, || Ok(self.alpha))?;
-            let coeffs = vec![alpha, FpVar::Constant(Fr::from(1u64))];
+            let coeffs = build_row_coeffs_from_alpha(&alpha, 2);
             enforce_logup_rows(
                 query_rows[0][0].cs(),
                 &table_rows,
@@ -393,7 +476,7 @@ mod tests {
 
             let beta = FpVar::new_input(cs.clone(), || Ok(self.beta))?;
             let alpha = FpVar::new_input(cs, || Ok(self.alpha))?;
-            let coeffs = vec![alpha, FpVar::Constant(Fr::from(1u64))];
+            let coeffs = build_row_coeffs_from_alpha(&alpha, 2);
             enforce_logup_rows(
                 query_rows[0][0].cs(),
                 &table_rows,
@@ -491,6 +574,29 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let res = circuit.generate_constraints(cs);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_multicolumn_lookup_circuit() -> Result<(), SynthesisError> {
+        let table_rows = vec![
+            vec_fr(&[0, 10, 100]),
+            vec_fr(&[1, 20, 200]),
+            vec_fr(&[2, 30, 300]),
+            vec_fr(&[3, 40, 400]),
+        ];
+        let query_rows = vec![table_rows[3].clone(), table_rows[1].clone(), table_rows[3].clone()];
+
+        let circuit = MultiColumnLookupCircuit {
+            table_rows,
+            query_rows,
+            alpha: Fr::from(7u64),
+            beta: Fr::from(101u64),
+        };
+
+        let num_constraints = assert_circuit_satisfied(circuit)?;
+        assert!(num_constraints > 0);
+        eprintln!("multicolumn_lookup constraints = {}", num_constraints);
+        Ok(())
     }
 
     #[test]

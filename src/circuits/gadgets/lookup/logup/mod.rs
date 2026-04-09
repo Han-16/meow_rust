@@ -4,9 +4,6 @@ use super::*;
 
 use ark_std::rand::{CryptoRng, RngCore};
 
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
-
 pub struct LogUp<F: Field> {
     tables: Vec<Table<F>>,
     entries: Vec<Entry<F>>,
@@ -68,29 +65,22 @@ impl<F: Field> LookupArgument<F> for LogUp<F> {
         self.counts.fill(0);
         entry.sort();
 
-        #[cfg(not(feature = "parallel"))]
-        {
-            let mut table_idx = 0usize;
-            let mut entry_idx = 0usize;
-            while entry_idx < entry.len() {
-                let target = entry[entry_idx];
-                while table_idx < table.len() && table[table_idx] < target {
-                    table_idx += 1;
-                }
-                if table_idx == table.len() || table[table_idx] != target {
-                    return Err(Error::EntryNotFound(target.to_string()));
-                }
-                let mut cnt = 0usize;
-                while entry_idx + cnt < entry.len() && entry[entry_idx + cnt] == target {
-                    cnt += 1;
-                }
-                self.counts[table_idx] = cnt;
-                entry_idx += cnt;
+        let mut table_idx = 0usize;
+        let mut entry_idx = 0usize;
+        while entry_idx < entry.len() {
+            let target = entry[entry_idx];
+            while table_idx < table.len() && table[table_idx] < target {
+                table_idx += 1;
             }
-        }
-        #[cfg(feature = "parallel")]
-        {
-            todo!("parallelization is not yet supported");
+            if table_idx == table.len() || table[table_idx] != target {
+                return Err(Error::EntryNotFound(target.to_string()));
+            }
+            let mut cnt = 0usize;
+            while entry_idx + cnt < entry.len() && entry[entry_idx + cnt] == target {
+                cnt += 1;
+            }
+            self.counts[table_idx] = cnt;
+            entry_idx += cnt;
         }
 
         Ok(())
