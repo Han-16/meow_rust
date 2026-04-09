@@ -4,10 +4,13 @@ use ark_groth16::{Groth16, VerifyingKey};
 use ark_snark::SNARK;
 use std::time::{Duration, Instant};
 
-use crate::crypto::hash::{generate_unique_indices, hash_elements, poseidon_hash_elements_bn254};
+use crate::crypto::hash::{generate_unique_indices, poseidon_hash_elements_bn254};
 use crate::crypto::merkle::verify_membership;
 use crate::protocol::prover::build_public_inputs;
-use crate::protocol::{ProtocolError, ProtocolParams, ProtocolProof};
+use crate::protocol::{
+    derive_challenge_r, derive_fiat_shamir_challenges, derive_query_index_seed, ProtocolError,
+    ProtocolParams, ProtocolProof,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct VerifyTimeBreakdown {
@@ -59,23 +62,37 @@ impl Verifier {
         }
 
         // 4-5) Recompute random scalar from Merkle roots and check scalar challenge.
-        let r_scalar = hash_elements(&[
+        let r_scalar = derive_challenge_r(
             proof.public.root_a,
             proof.public.root_b,
             proof.public.root_c,
-        ]);
+        );
         if r_scalar != proof.public.challenge_r {
             return Ok((false, timings));
         }
 
         // 8) Recompute query set from cm_x, cm_y, cm_z.
-        let idx_seed = hash_elements(&[
+        let idx_seed = derive_query_index_seed(
             proof.public.root_x,
             proof.public.root_y,
             proof.public.root_z,
-        ]);
+        );
         let expected_indices = generate_unique_indices(idx_seed, self.params.n, self.params.l)?;
         if expected_indices != proof.public.indices {
+            return Ok((false, timings));
+        }
+
+        let (
+            expected_lookup_index_challenge,
+            expected_lookup_logup_challenge,
+            expected_rs_point_x,
+            expected_rs_point_y,
+        ) = derive_fiat_shamir_challenges(&proof.public, self.params.n);
+        if expected_lookup_index_challenge != proof.public.lookup_index_challenge
+            || expected_lookup_logup_challenge != proof.public.lookup_logup_challenge
+            || expected_rs_point_x != proof.public.rs_point_x
+            || expected_rs_point_y != proof.public.rs_point_y
+        {
             return Ok((false, timings));
         }
 
